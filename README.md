@@ -52,3 +52,9 @@ streamlit run src/app.py
 - PyDub
 - Torch
 - Fast-Whisper
+
+## Prompt
+见prompt.txt, 配合 deepseek r1 对播客内容进行总结和分析，示例：
+
+<img width="1191" alt="image" src="https://github.com/user-attachments/assets/d4c69b9a-e654-4ea6-8289-f973705f6a48" />
+
