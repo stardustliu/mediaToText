@@ -6,20 +6,22 @@ from pydub import AudioSegment
 
 torch.classes.__path__ = []
 
-from download import fetch_audio_file
+from download import download_podcast_audio, download_youtube_audio
 from transcribe import transcribe_audio
 
-st.title("xiaoyuzhou FM 播客下载与转录工具")
+st.title("xiaoyuzhou FM / YouTube 音频下载与转录工具")
 
 # 初始化会话状态
 if "download_completed" not in st.session_state:
     st.session_state.download_completed = False
 if "audio_path" not in st.session_state:
     st.session_state.audio_path = None
-if "podcast_title" not in st.session_state:
-    st.session_state.podcast_title = None
+if "media_title" not in st.session_state:
+    st.session_state.media_title = None
 if "transcript" not in st.session_state:
     st.session_state.transcript = None
+if "source_type" not in st.session_state:
+    st.session_state.source_type = "小宇宙播客"
 
 
 def format_duration(seconds: float) -> str:
@@ -42,10 +44,25 @@ def format_duration(seconds: float) -> str:
 
 # 下载部分
 download_expander = st.expander(
-    "第一步：下载播客", expanded=not st.session_state.download_completed
+    "第一步：下载音频", expanded=not st.session_state.download_completed
 )
 with download_expander:
-    url = st.text_input("请输入小宇宙播客链接：")
+    st.session_state.source_type = st.radio(
+        "选择内容来源：",
+        ("小宇宙播客", "YouTube 视频"),
+        key="source_radio"
+    )
+
+    url_label = f"请输入{st.session_state.source_type}链接："
+    url = st.text_input(url_label)
+
+    # 添加 Cookies 文件路径输入 (仅 YouTube)
+    cookies_path = None
+    if st.session_state.source_type == "YouTube 视频":
+        cookies_path = st.text_input(
+            "YouTube Cookies 文件路径 (可选):", 
+            help="如果 YouTube 下载失败或需要登录，请在此处提供从浏览器导出的 cookies.txt 文件路径。"
+        )
 
     if st.button("开始下载"):
         if url:
@@ -53,32 +70,74 @@ with download_expander:
             status_text = st.empty()
 
             try:
-
                 def update_progress(progress):
-                    progress_bar.progress(progress)
-                    status_text.text(f"下载进度：{int(progress * 100)}%")
+                    # 根据 progress 的值更新状态
+                    # 0.0: 开始下载
+                    # 1.0: 下载完成
+                    # -1.0: 下载出错
+                    # 其他值: 播客下载时的百分比
+                    if progress == 0.0:
+                        progress_bar.progress(0)
+                        status_text.text(f"正在开始下载 {st.session_state.source_type} 音频...")
+                    elif progress == 1.0:
+                        progress_bar.progress(100)
+                        status_text.text("下载完成！")
+                    elif progress == -1.0:
+                        status_text.text("下载出错，请查看控制台日志。")
+                        # 可以考虑显示一个错误状态，或者清除进度条
+                        progress_bar.progress(0) # 或 progress_bar.empty()
+                    elif 0 < progress < 1:
+                        progress_percentage = int(progress * 100)
+                        progress_bar.progress(progress_percentage)
+                        status_text.text(f"下载进度：{progress_percentage}%")
+                    # 对于 yt-dlp，我们可能只收到 0.0 和 1.0 (或 -1.0)
 
-                st.session_state.audio_path, st.session_state.podcast_title = (
-                    fetch_audio_file(url, update_progress)
-                )
-                st.session_state.download_completed = True
-                status_text.text("下载完成！")
-                st.success(f"成功下载播客：{st.session_state.podcast_title}")
+                # 初始化状态
+                status_text.text(f"准备下载 {st.session_state.source_type} 音频...")
+                progress_bar.progress(0)
+
+                audio_path = None
+                media_title = None
+
+                if st.session_state.source_type == "小宇宙播客":
+                    audio_path, media_title = download_podcast_audio(url, update_progress)
+                elif st.session_state.source_type == "YouTube 视频":
+                    audio_path, media_title = download_youtube_audio(url, update_progress, cookies_path=cookies_path)
+
+                if audio_path and media_title:
+                    st.session_state.audio_path = audio_path
+                    st.session_state.media_title = media_title
+                    st.session_state.download_completed = True
+                    status_text.text("下载完成！")
+                    st.success(f"成功下载音频：{st.session_state.media_title}")
+                else:
+                    st.error(f"下载失败，请检查链接或查看控制台输出。")
+                    st.session_state.download_completed = False
+                    st.session_state.audio_path = None
+                    st.session_state.media_title = None
+
             except Exception as e:
-                st.error(f"下载失败：{str(e)}")
+                st.error(f"下载过程中发生错误：{str(e)}")
+                st.session_state.download_completed = False
+                st.session_state.audio_path = None
+                st.session_state.media_title = None
         else:
-            st.warning("请输入有效的播客链接")
+            st.warning(f"请输入有效的{st.session_state.source_type}链接")
 
 # 常驻显示下载后的音频播放器
 if st.session_state.download_completed:
-    st.text(st.session_state.podcast_title)
+    st.text(st.session_state.media_title)
     # 获取音频时长
-    audio = AudioSegment.from_file(st.session_state.audio_path)
-    duration = audio.duration_seconds
-    readable_duration = format_duration(duration)
-    st.text(f"音频长度：{readable_duration}")
-    st.text(f"音频大小：{os.path.getsize(st.session_state.audio_path) / 1024 / 1024:.2f} MB")
-    st.audio(st.session_state.audio_path)
+    try:
+        audio = AudioSegment.from_file(st.session_state.audio_path)
+        duration = audio.duration_seconds
+        readable_duration = format_duration(duration)
+        st.text(f"音频长度：{readable_duration}")
+        st.text(f"音频大小：{os.path.getsize(st.session_state.audio_path) / 1024 / 1024:.2f} MB")
+        st.audio(st.session_state.audio_path)
+    except Exception as e:
+        st.error(f"加载音频信息时出错: {e}")
+        st.session_state.download_completed = False 
 
 # 转录部分
 transcribe_expander = st.expander(
@@ -90,41 +149,54 @@ with transcribe_expander:
 
         # 设备选择
         device_options = ["CPU"]
-        selected_device = st.selectbox("选择运行设备：", device_options)
+        try:
+            if torch.cuda.is_available():
+                device_options.append("GPU (CUDA)")
+        except Exception as e:
+            st.warning(f"检测可用设备时出错: {e}")
+            
+        selected_device_display = st.selectbox("选择运行设备：", device_options)
 
         # 转换设备选择为程序可用的格式
-        device_map = {"CPU": "cpu"}
+        device_map = {"CPU": "cpu", "GPU (CUDA)": "cuda", "GPU (MPS)": "mps"}
+        selected_device = device_map.get(selected_device_display, "cpu")
 
         # 格式选择
         output_format = st.selectbox("选择输出格式：", ["txt", "srt"])
 
         if st.button("开始转录", disabled=st.session_state.get('is_transcribing', False)):
             try:
-                status_text = st.empty()
+                status_text_transcribe = st.empty()
                 st.session_state.is_transcribing = True
-                status_text.text("转录中...")
+                status_text_transcribe.text("转录中...")
 
                 # 设置输出文件名
-                output_file = f"{st.session_state.podcast_title}.{output_format}"
+                output_file = f"{st.session_state.media_title}.{output_format}"
 
                 # 记录开始时间
                 start_time = time.time()
 
-                audio_length_minutes = duration / 60
-                estimated_time = audio_length_minutes * 6  # 每分钟6秒的转录时间
-                st.info(f"预计转录时间：{estimated_time/60:.2f} 分钟")
+                try:
+                    audio = AudioSegment.from_file(st.session_state.audio_path)
+                    duration = audio.duration_seconds
+                    audio_length_minutes = duration / 60
+                    estimated_time_factor = 10 if selected_device == "cpu" else 3
+                    estimated_time = audio_length_minutes * estimated_time_factor
+                    st.info(f"预计转录时间：约 {estimated_time/60:.1f} 分钟")
+                except Exception as e:
+                     st.warning(f"无法计算预计时间: {e}")
 
                 # 开始转录
                 transcribe_audio(
                     st.session_state.audio_path,
                     output_file,
                     output_format,
-                    device_map[selected_device],
+                    selected_device,
                 )
 
                 # 计算耗时
                 elapsed_time = time.time() - start_time
-                status_text.text("转录完成！")
+                status_text_transcribe.text("转录完成！")
 
                 # 读取并显示转录结果
                 with open(output_file, "r", encoding="utf-8") as f:
@@ -143,7 +215,7 @@ with transcribe_expander:
                 st.error(f"转录失败：{str(e)}")
                 st.session_state.is_transcribing = False
     else:
-        st.info("请先完成播客下载")
+        st.info("请先成功完成音频下载")
 
 # 转录结果显示
 if st.session_state.transcript:

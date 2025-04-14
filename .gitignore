@@ -4,3 +4,5 @@
 *.srt
 .venv/
 audio_files/
+俄乌冲突.pdf
+src/__pycache__/*
