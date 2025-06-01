@@ -141,17 +141,15 @@ def download_youtube_audio(url, progress_callback=None, cookies_path=None): # �
         audio_path = os.path.join("audio_files", output_filename)
 
         # 2. 构建 yt-dlp 下载命令
-        #    -x: 提取音频
-        #    --audio-format mp3: 指定音频格式为 mp3
-        #    -o: 指定输出模板
-        #    --progress: 显示进度（在命令行中，但我们不直接捕获给 Streamlit）
+        #    -f ba: 选择最佳质量的纯音频流
+        #    -o: 指定输出模板 (使用 %(ext)s 让 yt-dlp 决定扩展名)
+        #    --progress: 显示进度
         #    --no-playlist: 如果是播放列表链接，只下载单个视频
         #    --no-warnings: 减少不必要的输出
         download_command = [
             'yt-dlp',
-            '-x', # 提取音频
-            '--audio-format', 'mp3', # 指定格式为 mp3
-            '-o', os.path.join("audio_files", f"{safe_title}-youtube_audio.%(ext)s"), # 输出模板
+            '-f', 'ba', # 请求最佳音频 (bestaudio)
+            '-o', os.path.join("audio_files", f"{safe_title}-youtube_audio.%(ext)s"), # 输出模板，扩展名由 yt-dlp 决定
             '--progress',
             '--no-playlist',
             '--no-warnings',

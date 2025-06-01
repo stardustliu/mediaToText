@@ -22,6 +22,8 @@ if "transcript" not in st.session_state:
     st.session_state.transcript = None
 if "source_type" not in st.session_state:
     st.session_state.source_type = "小宇宙播客"
+if "pdf_path" not in st.session_state:
+    st.session_state.pdf_path = None
 
 
 def format_duration(seconds: float) -> str:
@@ -186,29 +188,52 @@ with transcribe_expander:
                 except Exception as e:
                      st.warning(f"无法计算预计时间: {e}")
 
-                # 开始转录
-                transcribe_audio(
+                # 开始转录 - 修改这里获取返回的PDF路径
+                txt_path, pdf_path = transcribe_audio(
                     st.session_state.audio_path,
                     output_file,
                     output_format,
                     selected_device,
                 )
 
+                # 保存PDF路径到会话状态
+                st.session_state.pdf_path = pdf_path
+
                 # 计算耗时
                 elapsed_time = time.time() - start_time
                 status_text_transcribe.text("转录完成！")
 
                 # 读取并显示转录结果
-                with open(output_file, "r", encoding="utf-8") as f:
+                with open(txt_path, "r", encoding="utf-8") as f:
                     st.session_state.transcript = f.read()
 
                 st.success(f"转录完成！耗时：{elapsed_time:.2f}秒")
-                st.download_button(
-                    label="下载转录文件",
-                    data=st.session_state.transcript,
-                    file_name=output_file,
-                    mime="text/plain",
-                )
+                
+                # 创建下载按钮容器
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.download_button(
+                        label="📄 下载转录文件 (TXT)",
+                        data=st.session_state.transcript,
+                        file_name=os.path.basename(txt_path),
+                        mime="text/plain",
+                    )
+                
+                with col2:
+                    # PDF下载按钮
+                    if pdf_path and os.path.exists(pdf_path):
+                        with open(pdf_path, "rb") as pdf_file:
+                            pdf_data = pdf_file.read()
+                        st.download_button(
+                            label="📑 下载转录文件 (PDF)",
+                            data=pdf_data,
+                            file_name=os.path.basename(pdf_path),
+                            mime="application/pdf",
+                        )
+                    else:
+                        st.info("PDF 文件生成失败或不可用")
+
                 st.session_state.is_transcribing = False
 
             except Exception as e:
