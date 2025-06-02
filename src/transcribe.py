@@ -45,18 +45,29 @@ def generate_txt(segments):
     return "\n".join(segment.text.strip() for segment in segments)
 
 
-def transcribe_audio(audio_path, output_file, output_format="txt", device_option='cpu'):
-    print(f"audio path: {audio_path}, output file: {output_file}, output format: {output_format}, device option: {device_option}")
+def transcribe_audio(audio_path, output_file, output_format="txt", device_option='cpu', model_size='base'):
+    print(f"audio path: {audio_path}, output file: {output_file}, output format: {output_format}, device option: {device_option}, model: {model_size}")
 
     # 根据设备设置计算类型：GPU 使用 float16，其它使用 int8
     compute_type = "float16" if device_option == "cuda" else "int8"
 
-    # 加载 faster‑whisper 模型，指定模型大小为 "base"
-    model = WhisperModel("base", device=device_option, compute_type=compute_type)
-    print("Whisper 模型已加载。")
+    # 加载指定大小的模型
+    model = WhisperModel(model_size, device=device_option, compute_type=compute_type)
+    print(f"Whisper {model_size} 模型已加载。")
 
-    # 使用 faster‑whisper 进行音频转录，beam_size 设置为 5
-    segments, info = model.transcribe(audio_path, beam_size=5)
+    # 优化转录参数，特别是对中文的支持
+    segments, info = model.transcribe(
+        audio_path, 
+        beam_size=5,
+        language="zh",  # 明确指定中文
+        task="transcribe",
+        temperature=0.0,  # 降低随机性
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
+        vad_filter=True,  # 启用语音活动检测
+        vad_parameters=dict(min_silence_duration_ms=500)
+    )
     print("音频转录完成。")
     print("检测到语言：%s (概率: %f)" % (info.language, info.language_probability))
 

@@ -6,3 +6,9 @@
 audio_files/
 俄乌冲突.pdf
 src/__pycache__/*
+
+# 临时上传文件
+temp_uploads/
+*.tmp
+
+*.pdf
