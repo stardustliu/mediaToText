@@ -9,6 +9,7 @@ torch.classes.__path__ = []
 
 from download import download_podcast_audio, download_youtube_audio
 from transcribe import transcribe_audio
+from summarize import PodcastSummarizer
 
 st.title("xiaoyuzhou FM / YouTube 音频下载与转录工具")
 
@@ -31,7 +32,21 @@ if "pdf_path" not in st.session_state:
     st.session_state.pdf_path = None
 if "output_format" not in st.session_state:
     st.session_state.output_format = "txt"
+# 新增：总结功能相关状态
+if "summarize_completed" not in st.session_state:
+    st.session_state.summarize_completed = False
+if "summary_data" not in st.session_state:
+    st.session_state.summary_data = None
+if "deep_analysis_result" not in st.session_state:
+    st.session_state.deep_analysis_result = None
+if "summarizer" not in st.session_state:
+    st.session_state.summarizer = None
 
+# 初始化总结器
+@st.cache_resource
+def get_summarizer():
+    """获取缓存的总结器实例"""
+    return PodcastSummarizer()
 
 def format_duration(seconds: float) -> str:
     """将秒数转换为可读的时分秒格式"""
@@ -404,9 +419,237 @@ with transcribe_expander:
 
 # 下载文件部分（独立显示，不会因为页面刷新而消失）
 if st.session_state.transcribe_completed and st.session_state.transcript:
-    download_expander = st.expander("第三步：下载转录文件", expanded=True)
+    # 第三步：AI总结功能
+    summarize_expander = st.expander(
+        "第三步：AI智能总结", expanded=st.session_state.transcribe_completed and not st.session_state.summarize_completed
+    )
+    with summarize_expander:
+        st.info("📝 对转录文本进行智能分段总结和整体分析")
+        
+        # 初始化总结器
+        if st.session_state.summarizer is None:
+            try:
+                st.session_state.summarizer = get_summarizer()
+            except Exception as e:
+                st.error(f"初始化AI总结器失败：{str(e)}")
+                st.info("💡 请检查config.yaml配置文件是否存在并正确配置")
+                st.stop()
+        
+        # 检查可用模型
+        available_models = st.session_state.summarizer.get_available_models()
+        
+        if not available_models:
+            st.warning("⚠️ 未检测到已配置的AI模型")
+            st.info("请在config.yaml文件中配置至少一个AI模型的API密钥")
+            
+            # 显示配置示例
+            with st.expander("📖 配置说明"):
+                st.code("""
+# 在config.yaml中配置API密钥，例如：
+ai_models:
+  openai:
+    api_key: "your_openai_api_key_here"
+  claude:
+    api_key: "your_claude_api_key_here"
+                """)
+        else:
+            # AI模型选择
+            selected_model = st.selectbox(
+                "选择AI模型：",
+                list(available_models.keys()),
+                format_func=lambda x: available_models[x]
+            )
+            
+            # 创建两个标签页：基础总结和高级分析
+            tab1, tab2 = st.tabs(["📊 基础总结", "🧠 高级分析"])
+            
+            with tab1:
+                st.write("**功能说明：**")
+                st.write("• 智能主题分段")
+                st.write("• 分段简洁总结（1-2句话）")
+                st.write("• 整体内容概览")
+                st.write("• 关键词和主题提取")
+                
+                # 分段总结设置
+                col1, col2 = st.columns(2)
+                with col1:
+                    include_keywords = st.checkbox("包含关键词提取", value=True)
+                with col2:
+                    include_topics = st.checkbox("包含主题分析", value=True)
+                
+                if st.button("🚀 开始智能总结", key="start_summary"):
+                    if st.session_state.transcript:
+                        try:
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            def update_progress(progress, message):
+                                progress_bar.progress(progress)
+                                status_text.text(message)
+                            
+                            # 执行总结
+                            summary_result = st.session_state.summarizer.summarize_transcript(
+                                st.session_state.transcript,
+                                selected_model,
+                                progress_callback=update_progress
+                            )
+                            
+                            st.session_state.summary_data = summary_result
+                            st.session_state.summarize_completed = True
+                            
+                            status_text.text("总结完成！")
+                            st.success("✅ AI总结已完成")
+                            st.rerun()
+                            
+                        except Exception as e:
+                            st.error(f"总结失败：{str(e)}")
+                            if "API" in str(e):
+                                st.info("💡 请检查API密钥是否正确配置，以及网络连接是否正常")
+                    else:
+                        st.error("未找到转录文本")
+            
+            with tab2:
+                st.write("**功能说明：**")
+                st.write("• 基于prompt.txt的深度分析")
+                st.write("• 结构化内容输出")
+                st.write("• 专业技术文档格式")
+                st.write("• 适合公众号文章等用途")
+                
+                if os.path.exists("prompt.txt"):
+                    # 使用checkbox代替嵌套的expander
+                    show_template = st.checkbox("📄 查看分析模板", value=False)
+                    if show_template:
+                        with open("prompt.txt", "r", encoding="utf-8") as f:
+                            prompt_content = f.read()
+                        st.code(prompt_content, language="text")
+                    
+                    if st.button("🧠 开始深度分析", key="start_deep_analysis"):
+                        if st.session_state.transcript:
+                            try:
+                                with st.spinner("正在进行深度分析..."):
+                                    deep_result = st.session_state.summarizer.deep_analysis(
+                                        st.session_state.transcript,
+                                        selected_model
+                                    )
+                                    st.session_state.deep_analysis_result = deep_result
+                                    st.success("✅ 深度分析已完成")
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"深度分析失败：{str(e)}")
+                        else:
+                            st.error("未找到转录文本")
+                else:
+                    st.warning("未找到prompt.txt文件，无法进行深度分析")
+                    st.info("请确保prompt.txt文件在项目根目录中")
+    
+    # 显示总结结果
+    if st.session_state.summary_data:
+        results_expander = st.expander("📋 总结结果", expanded=True)
+        with results_expander:
+            summary = st.session_state.summary_data
+            
+            # 显示总体总结
+            st.subheader("📝 总体总结")
+            st.write(summary['overall_summary'])
+            
+            # 显示主题分析
+            if summary['topics']:
+                st.subheader("🏷️ 主要主题")
+                for i, topic in enumerate(summary['topics'], 1):
+                    st.write(f"{i}. {topic}")
+            
+            # 显示分段总结
+            st.subheader("📑 分段总结")
+            for segment in summary['segments']:
+                with st.container():
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"**第{segment['index']}段**")
+                        if segment['start_time']:
+                            st.caption(f"时间: {segment['start_time']}")
+                        st.write(segment['summary'])
+                    with col2:
+                        if segment['keywords']:
+                            st.write("**关键词:**")
+                            for kw in segment['keywords']:
+                                st.badge(kw)
+                    st.divider()
+            
+            # 导出选项
+            st.subheader("💾 导出总结")
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("📄 导出为TXT"):
+                    try:
+                        txt_path = st.session_state.summarizer.export_summary(
+                            summary, "txt", st.session_state.media_title
+                        )
+                        with open(txt_path, 'r', encoding='utf-8') as f:
+                            txt_content = f.read()
+                        st.download_button(
+                            "下载TXT文件",
+                            txt_content,
+                            file_name=os.path.basename(txt_path),
+                            mime="text/plain"
+                        )
+                        st.success("TXT文件已生成")
+                    except Exception as e:
+                        st.error(f"导出TXT失败：{str(e)}")
+            
+            with col2:
+                if st.button("📝 导出为Markdown"):
+                    try:
+                        md_path = st.session_state.summarizer.export_summary(
+                            summary, "markdown", st.session_state.media_title
+                        )
+                        with open(md_path, 'r', encoding='utf-8') as f:
+                            md_content = f.read()
+                        st.download_button(
+                            "下载Markdown文件",
+                            md_content,
+                            file_name=os.path.basename(md_path),
+                            mime="text/markdown"
+                        )
+                        st.success("Markdown文件已生成")
+                    except Exception as e:
+                        st.error(f"导出Markdown失败：{str(e)}")
+            
+            with col3:
+                if st.button("📑 导出为PDF"):
+                    try:
+                        pdf_path = st.session_state.summarizer.export_summary(
+                            summary, "pdf", st.session_state.media_title
+                        )
+                        with open(pdf_path, 'rb') as f:
+                            pdf_content = f.read()
+                        st.download_button(
+                            "下载PDF文件",
+                            pdf_content,
+                            file_name=os.path.basename(pdf_path),
+                            mime="application/pdf"
+                        )
+                        st.success("PDF文件已生成")
+                    except Exception as e:
+                        st.error(f"导出PDF失败：{str(e)}")
+    
+    # 显示深度分析结果
+    if st.session_state.deep_analysis_result:
+        analysis_expander = st.expander("🧠 深度分析结果", expanded=True)
+        with analysis_expander:
+            st.write(st.session_state.deep_analysis_result)
+            
+            # 导出深度分析结果
+            st.download_button(
+                "📥 下载深度分析报告",
+                st.session_state.deep_analysis_result,
+                file_name=f"{st.session_state.media_title}_深度分析.txt",
+                mime="text/plain"
+            )
+    
+    download_expander = st.expander("第四步：下载转录文件", expanded=False)
     with download_expander:
-        st.success("✅ 转录已完成，可以下载文件")
+        st.success("✅ 转录已完成，可以下载原始转录文件")
         
         # 创建下载按钮容器
         col1, col2 = st.columns(2)
@@ -451,6 +694,10 @@ if st.session_state.transcribe_completed and st.session_state.transcript:
             st.session_state.transcript = None
             st.session_state.txt_path = None
             st.session_state.pdf_path = None
+            # 同时重置总结相关状态
+            st.session_state.summarize_completed = False
+            st.session_state.summary_data = None
+            st.session_state.deep_analysis_result = None
             st.rerun()
 
 # 转录结果显示
@@ -480,6 +727,53 @@ with st.sidebar:
     if "source_type" in st.session_state:
         st.info(f"当前内容来源：{st.session_state.source_type}")
     
+    # 显示当前进度
+    progress_info = []
+    if st.session_state.download_completed:
+        progress_info.append("✅ 音频下载")
+    if st.session_state.transcribe_completed:
+        progress_info.append("✅ 音频转录")
+    if st.session_state.summarize_completed:
+        progress_info.append("✅ AI总结")
+    if st.session_state.deep_analysis_result:
+        progress_info.append("✅ 深度分析")
+    
+    if progress_info:
+        st.write("**当前进度：**")
+        for info in progress_info:
+            st.write(info)
+    
+    st.divider()
+    
+    # 配置管理
+    st.subheader("⚙️ 配置管理")
+    
+    # 检查配置文件状态
+    if os.path.exists("config.yaml"):
+        st.success("✅ 配置文件已存在")
+        if st.button("📝 编辑配置"):
+            st.info("请直接编辑项目根目录下的 config.yaml 文件")
+    else:
+        st.warning("⚠️ 配置文件不存在")
+        if st.button("📝 创建配置文件"):
+            st.info("配置文件已在项目启动时创建，请刷新页面")
+    
+    # AI模型状态
+    if st.session_state.summarizer:
+        models = st.session_state.summarizer.get_available_models()
+        if models:
+            st.success(f"✅ 已配置 {len(models)} 个AI模型")
+            with st.expander("查看可用模型"):
+                for key, name in models.items():
+                    st.write(f"• {name}")
+        else:
+            st.warning("⚠️ 未配置AI模型")
+    
+    st.divider()
+    
+    # 清理和重置功能
+    st.subheader("🧹 清理工具")
+    
     # 清理临时文件按钮
     if st.button("🗑️ 清理临时文件"):
         if cleanup_temp_files():
@@ -490,10 +784,13 @@ with st.sidebar:
     # 重置所有状态
     if st.button("🔄 重置所有状态"):
         for key in list(st.session_state.keys()):
-            del st.session_state[key]
+            if key not in ['summarizer']:  # 保留缓存的总结器
+                del st.session_state[key]
         cleanup_temp_files()
         st.success("状态已重置")
         st.rerun()
+    
+    st.divider()
     
     # 显示支持的文件格式
     with st.expander("📋 支持的文件格式"):
@@ -501,4 +798,25 @@ with st.sidebar:
         st.write("MP3, WAV, M4A, FLAC, OGG, AAC")
         st.write("**视频格式：**")
         st.write("MP4, MKV, AVI, MOV, WMV, WebM")
-        st.write("*视频文件会自动提取音频*")
+        st.write("**导出格式：**")
+        st.write("TXT, SRT, PDF, Markdown")
+    
+    # 帮助信息
+    with st.expander("❓ 使用帮助"):
+        st.write("**第一步：** 获取音频文件")
+        st.write("- 支持小宇宙播客链接")
+        st.write("- 支持YouTube视频链接")
+        st.write("- 支持本地文件上传")
+        
+        st.write("**第二步：** 音频转录")
+        st.write("- 选择适合的设备和模型")
+        st.write("- 支持多种输出格式")
+        
+        st.write("**第三步：** AI智能总结")
+        st.write("- 基础总结：智能分段和概览")
+        st.write("- 高级分析：深度内容分析")
+        
+        st.write("**第四步：** 下载文件")
+        st.write("- 原始转录文件")
+        st.write("- AI总结报告")
+        st.write("- 深度分析报告")

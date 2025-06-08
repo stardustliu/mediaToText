@@ -1,0 +1,574 @@
+import os
+import re
+import yaml
+import requests
+import json
+from typing import List, Dict, Tuple, Optional
+from datetime import datetime
+import streamlit as st
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.units import inch
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+import io
+
+
+class AIModelClient:
+    """统一的AI模型客户端，支持OpenAI API风格的多种模型"""
+    
+    def __init__(self, model_config: Dict):
+        self.config = model_config
+        self.base_url = model_config['base_url'].rstrip('/')
+        self.api_key = model_config['api_key']
+        self.model = model_config['model']
+        self.max_tokens = model_config.get('max_tokens', 4000)
+        self.temperature = model_config.get('temperature', 0.3)
+    
+    def _is_anthropic_api(self) -> bool:
+        """检查是否为Anthropic Claude API"""
+        return 'anthropic.com' in self.base_url
+    
+    def call_api(self, messages: List[Dict], system_prompt: str = "") -> str:
+        """调用AI API进行文本生成"""
+        try:
+            headers = {
+                'Content-Type': 'application/json'
+            }
+            
+            # 根据不同API设置认证头
+            if self._is_anthropic_api():
+                headers['x-api-key'] = self.api_key
+                headers['anthropic-version'] = '2023-06-01'
+                
+                # Claude API格式
+                data = {
+                    'model': self.model,
+                    'max_tokens': self.max_tokens,
+                    'temperature': self.temperature,
+                    'messages': messages
+                }
+                if system_prompt:
+                    data['system'] = system_prompt
+                
+                url = f"{self.base_url}/messages"
+            else:
+                # OpenAI API格式
+                headers['Authorization'] = f'Bearer {self.api_key}'
+                
+                # 构建消息列表
+                api_messages = []
+                if system_prompt:
+                    api_messages.append({"role": "system", "content": system_prompt})
+                api_messages.extend(messages)
+                
+                data = {
+                    'model': self.model,
+                    'messages': api_messages,
+                    'max_tokens': self.max_tokens,
+                    'temperature': self.temperature
+                }
+                
+                url = f"{self.base_url}/chat/completions"
+            
+            response = requests.post(url, headers=headers, json=data, timeout=60)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            # 解析不同API的响应格式
+            if self._is_anthropic_api():
+                return result['content'][0]['text']
+            else:
+                return result['choices'][0]['message']['content']
+                
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"API调用失败: {str(e)}")
+        except KeyError as e:
+            raise Exception(f"API响应格式错误: {str(e)}")
+        except Exception as e:
+            raise Exception(f"未知错误: {str(e)}")
+
+
+class TextSegmenter:
+    """智能文本分段器，基于主题进行分段"""
+    
+    def __init__(self, min_length: int = 300, max_length: int = 1500, overlap_ratio: float = 0.1):
+        self.min_length = min_length
+        self.max_length = max_length
+        self.overlap_ratio = overlap_ratio
+    
+    def segment_by_topic(self, text: str) -> List[Dict]:
+        """基于主题智能分段"""
+        # 首先按段落分割
+        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+        
+        segments = []
+        current_segment = ""
+        current_length = 0
+        segment_start_time = None
+        
+        for i, paragraph in enumerate(paragraphs):
+            # 检测时间戳（用于播客转录）
+            time_match = re.search(r'\[(\d{1,2}):(\d{2}):(\d{2})\]', paragraph)
+            if time_match and not segment_start_time:
+                segment_start_time = f"{time_match.group(1)}:{time_match.group(2)}:{time_match.group(3)}"
+            
+            paragraph_length = len(paragraph)
+            
+            # 检查是否为主题转换点
+            is_topic_change = self._detect_topic_change(paragraph)
+            
+            # 分段条件：
+            # 1. 达到最大长度
+            # 2. 检测到主题转换且已达到最小长度
+            # 3. 是最后一个段落
+            should_split = (
+                current_length + paragraph_length > self.max_length or
+                (is_topic_change and current_length >= self.min_length) or
+                i == len(paragraphs) - 1
+            )
+            
+            if should_split and current_segment:
+                # 添加当前段落到分段中
+                if i < len(paragraphs) - 1:  # 不是最后一个段落
+                    current_segment += "\n" + paragraph
+                
+                segments.append({
+                    'content': current_segment.strip(),
+                    'start_time': segment_start_time,
+                    'length': len(current_segment),
+                    'index': len(segments) + 1
+                })
+                
+                # 重置并开始新分段
+                if i < len(paragraphs) - 1:  # 不是最后一个段落
+                    overlap_length = int(len(current_segment) * self.overlap_ratio)
+                    current_segment = current_segment[-overlap_length:] + "\n" + paragraph
+                    current_length = len(current_segment)
+                    segment_start_time = None
+                else:
+                    # 最后一个段落，添加到当前段落
+                    current_segment += "\n" + paragraph
+                    segments[-1]['content'] = current_segment.strip()
+                    segments[-1]['length'] = len(current_segment)
+            else:
+                # 继续添加到当前分段
+                if current_segment:
+                    current_segment += "\n" + paragraph
+                else:
+                    current_segment = paragraph
+                current_length = len(current_segment)
+        
+        # 处理剩余内容
+        if current_segment and not segments:
+            segments.append({
+                'content': current_segment.strip(),
+                'start_time': segment_start_time,
+                'length': len(current_segment),
+                'index': 1
+            })
+        
+        return segments
+    
+    def _detect_topic_change(self, paragraph: str) -> bool:
+        """检测主题转换的简单规则"""
+        # 主题转换指示词
+        topic_indicators = [
+            '接下来', '然后', '另外', '此外', '换个话题', '说到', 
+            '谈到', '关于', '我们再来看', '下面', '现在', '最后',
+            '总结', '总的来说', '综上'
+        ]
+        
+        # 问答模式检测
+        qa_patterns = [
+            r'^[问题|提问|主持人|嘉宾][:：]',
+            r'^Q[:：]',
+            r'^A[:：]',
+            r'那么.*问题是',
+            r'你觉得.*吗[？?]',
+            r'怎么.*看.*[？?]'
+        ]
+        
+        paragraph_lower = paragraph.lower()
+        
+        # 检查主题指示词
+        for indicator in topic_indicators:
+            if indicator in paragraph_lower:
+                return True
+        
+        # 检查问答模式
+        for pattern in qa_patterns:
+            if re.search(pattern, paragraph):
+                return True
+        
+        return False
+
+
+class PodcastSummarizer:
+    """播客总结器主类"""
+    
+    def __init__(self, config_path: str = "config.yaml"):
+        self.config = self._load_config(config_path)
+        self.segmenter = TextSegmenter(
+            min_length=self.config['summarization']['segmentation']['min_segment_length'],
+            max_length=self.config['summarization']['segmentation']['max_segment_length'],
+            overlap_ratio=self.config['summarization']['segmentation']['overlap_ratio']
+        )
+    
+    def _load_config(self, config_path: str) -> Dict:
+        """加载配置文件"""
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f)
+        except FileNotFoundError:
+            st.error(f"配置文件 {config_path} 不存在，请先创建配置文件")
+            return {}
+        except yaml.YAMLError as e:
+            st.error(f"配置文件格式错误: {str(e)}")
+            return {}
+    
+    def get_available_models(self) -> Dict[str, str]:
+        """获取可用的AI模型列表"""
+        models = {}
+        for key, model_config in self.config.get('ai_models', {}).items():
+            if model_config.get('api_key'):  # 只返回已配置API密钥的模型
+                models[key] = model_config['name']
+        return models
+    
+    def summarize_transcript(self, text: str, model_key: str, progress_callback=None) -> Dict:
+        """对转录文本进行总结"""
+        if not self.config:
+            raise Exception("配置文件加载失败")
+        
+        if model_key not in self.config['ai_models']:
+            raise Exception(f"未找到模型配置: {model_key}")
+        
+        model_config = self.config['ai_models'][model_key]
+        if not model_config.get('api_key'):
+            raise Exception(f"模型 {model_key} 的API密钥未配置")
+        
+        client = AIModelClient(model_config)
+        
+        # 1. 智能分段
+        if progress_callback:
+            progress_callback(0.1, "正在进行智能分段...")
+        
+        segments = self.segmenter.segment_by_topic(text)
+        
+        # 2. 分段总结
+        segment_summaries = []
+        total_segments = len(segments)
+        
+        for i, segment in enumerate(segments):
+            if progress_callback:
+                progress = 0.1 + (i / total_segments) * 0.7  # 10%-80%用于分段总结
+                progress_callback(progress, f"正在总结第 {i+1}/{total_segments} 段...")
+            
+            summary = self._summarize_segment(client, segment['content'], i+1)
+            segment_summaries.append({
+                'index': segment['index'],
+                'start_time': segment['start_time'],
+                'original_length': segment['length'],
+                'summary': summary,
+                'keywords': self._extract_keywords(client, segment['content']) if self.config['summarization']['summary']['include_keywords'] else []
+            })
+        
+        # 3. 总体总结
+        if progress_callback:
+            progress_callback(0.85, "正在生成总体总结...")
+        
+        overall_summary = self._generate_overall_summary(client, segment_summaries, text)
+        
+        # 4. 主题分析
+        topics = []
+        if self.config['summarization']['summary']['include_topics']:
+            if progress_callback:
+                progress_callback(0.95, "正在进行主题分析...")
+            topics = self._analyze_topics(client, text)
+        
+        if progress_callback:
+            progress_callback(1.0, "总结完成！")
+        
+        return {
+            'segments': segment_summaries,
+            'overall_summary': overall_summary,
+            'topics': topics,
+            'metadata': {
+                'total_segments': len(segments),
+                'original_length': len(text),
+                'model_used': model_config['name'],
+                'generated_at': datetime.now().isoformat()
+            }
+        }
+    
+    def _summarize_segment(self, client: AIModelClient, content: str, segment_index: int) -> str:
+        """总结单个分段"""
+        system_prompt = """你是一个专业的文本总结专家。请对给定的播客转录片段进行简洁总结。
+要求：
+1. 用1-2句话概括主要内容
+2. 保留关键信息和观点
+3. 语言简洁明了
+4. 保持中文输出"""
+        
+        messages = [{
+            "role": "user",
+            "content": f"请总结以下播客片段（第{segment_index}段）：\n\n{content}"
+        }]
+        
+        return client.call_api(messages, system_prompt)
+    
+    def _extract_keywords(self, client: AIModelClient, content: str) -> List[str]:
+        """提取关键词"""
+        system_prompt = """你是一个关键词提取专家。请从给定文本中提取3-5个最重要的关键词。
+要求：
+1. 只输出关键词，用逗号分隔
+2. 关键词应该是名词或专业术语
+3. 按重要性排序"""
+        
+        messages = [{
+            "role": "user",
+            "content": f"请从以下文本中提取关键词：\n\n{content}"
+        }]
+        
+        try:
+            result = client.call_api(messages, system_prompt)
+            return [kw.strip() for kw in result.split(',') if kw.strip()]
+        except:
+            return []
+    
+    def _generate_overall_summary(self, client: AIModelClient, segment_summaries: List[Dict], original_text: str) -> str:
+        """生成总体总结"""
+        summaries_text = "\n".join([f"{i+1}. {summary['summary']}" for i, summary in enumerate(segment_summaries)])
+        
+        system_prompt = """你是一个专业的内容总结专家。基于各个分段的总结，生成一个整体的综合总结。
+要求：
+1. 200-300字的总结
+2. 概括全文的主要主题和观点
+3. 保持逻辑清晰，结构完整
+4. 突出最重要的见解和结论
+5. 使用中文输出"""
+        
+        messages = [{
+            "role": "user",
+            "content": f"基于以下分段总结，请生成一个整体总结：\n\n{summaries_text}"
+        }]
+        
+        return client.call_api(messages, system_prompt)
+    
+    def _analyze_topics(self, client: AIModelClient, content: str) -> List[str]:
+        """分析主要主题"""
+        system_prompt = """你是一个主题分析专家。请分析给定文本的主要主题。
+要求：
+1. 识别3-5个主要主题
+2. 每个主题用简短的词组表示
+3. 按重要性排序
+4. 只输出主题列表，用换行符分隔"""
+        
+        # 为避免文本过长，取前2000字进行主题分析
+        content_sample = content[:2000] if len(content) > 2000 else content
+        
+        messages = [{
+            "role": "user",
+            "content": f"请分析以下文本的主要主题：\n\n{content_sample}"
+        }]
+        
+        try:
+            result = client.call_api(messages, system_prompt)
+            return [topic.strip() for topic in result.split('\n') if topic.strip()]
+        except:
+            return []
+    
+    def deep_analysis(self, text: str, model_key: str) -> str:
+        """基于prompt.txt进行深度分析"""
+        if not self.config['advanced_features']['deep_analysis']['enabled']:
+            raise Exception("深度分析功能未启用")
+        
+        prompt_file = self.config['advanced_features']['deep_analysis']['prompt_file_path']
+        
+        try:
+            with open(prompt_file, 'r', encoding='utf-8') as f:
+                custom_prompt = f.read()
+        except FileNotFoundError:
+            raise Exception(f"Prompt文件 {prompt_file} 不存在")
+        
+        model_config = self.config['ai_models'][model_key]
+        client = AIModelClient(model_config)
+        
+        messages = [{
+            "role": "user",
+            "content": f"请根据以下指导原则对播客内容进行深度分析：\n\n【分析指导】\n{custom_prompt}\n\n【播客内容】\n{text}"
+        }]
+        
+        return client.call_api(messages, "你是一个专业的内容分析专家，请严格按照给定的指导原则进行分析。")
+    
+    def export_summary(self, summary_data: Dict, format_type: str, filename: str) -> str:
+        """导出总结到不同格式"""
+        if format_type == "markdown":
+            return self._export_to_markdown(summary_data, filename)
+        elif format_type == "pdf":
+            return self._export_to_pdf(summary_data, filename)
+        elif format_type == "txt":
+            return self._export_to_txt(summary_data, filename)
+        else:
+            raise ValueError(f"不支持的导出格式: {format_type}")
+    
+    def _export_to_markdown(self, summary_data: Dict, filename: str) -> str:
+        """导出为Markdown格式"""
+        md_content = f"""# 播客总结报告
+
+## 基本信息
+- **生成时间**: {summary_data['metadata']['generated_at']}
+- **使用模型**: {summary_data['metadata']['model_used']}
+- **分段数量**: {summary_data['metadata']['total_segments']}
+- **原文长度**: {summary_data['metadata']['original_length']}字
+
+## 总体总结
+
+{summary_data['overall_summary']}
+
+## 主要主题
+"""
+        
+        if summary_data['topics']:
+            for i, topic in enumerate(summary_data['topics'], 1):
+                md_content += f"{i}. {topic}\n"
+        else:
+            md_content += "暂无主题分析\n"
+        
+        md_content += "\n## 分段总结\n\n"
+        
+        for segment in summary_data['segments']:
+            md_content += f"### 第{segment['index']}段"
+            if segment['start_time']:
+                md_content += f" ({segment['start_time']})"
+            md_content += "\n\n"
+            md_content += f"{segment['summary']}\n\n"
+            
+            if segment['keywords']:
+                md_content += f"**关键词**: {', '.join(segment['keywords'])}\n\n"
+        
+        # 保存文件
+        output_path = f"{filename}_summary.md"
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(md_content)
+        
+        return output_path
+    
+    def _export_to_txt(self, summary_data: Dict, filename: str) -> str:
+        """导出为纯文本格式"""
+        txt_content = f"""播客总结报告
+
+基本信息：
+生成时间: {summary_data['metadata']['generated_at']}
+使用模型: {summary_data['metadata']['model_used']}
+分段数量: {summary_data['metadata']['total_segments']}
+原文长度: {summary_data['metadata']['original_length']}字
+
+总体总结：
+{summary_data['overall_summary']}
+
+主要主题：
+"""
+        
+        if summary_data['topics']:
+            for i, topic in enumerate(summary_data['topics'], 1):
+                txt_content += f"{i}. {topic}\n"
+        else:
+            txt_content += "暂无主题分析\n"
+        
+        txt_content += "\n分段总结：\n\n"
+        
+        for segment in summary_data['segments']:
+            txt_content += f"第{segment['index']}段"
+            if segment['start_time']:
+                txt_content += f" ({segment['start_time']})"
+            txt_content += "：\n"
+            txt_content += f"{segment['summary']}\n"
+            
+            if segment['keywords']:
+                txt_content += f"关键词: {', '.join(segment['keywords'])}\n"
+            txt_content += "\n"
+        
+        # 保存文件
+        output_path = f"{filename}_summary.txt"
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(txt_content)
+        
+        return output_path
+    
+    def _export_to_pdf(self, summary_data: Dict, filename: str) -> str:
+        """导出为PDF格式"""
+        output_path = f"{filename}_summary.pdf"
+        
+        # 创建PDF文档
+        doc = SimpleDocTemplate(output_path, pagesize=A4)
+        story = []
+        styles = getSampleStyleSheet()
+        
+        # 尝试注册中文字体（如果可用）
+        try:
+            # 这里可以根据系统添加中文字体路径
+            # pdfmetrics.registerFont(TTFont('SimSun', 'SimSun.ttf'))
+            pass
+        except:
+            pass
+        
+        # 标题
+        title = Paragraph("播客总结报告", styles['Title'])
+        story.append(title)
+        story.append(Spacer(1, 12))
+        
+        # 基本信息
+        info_text = f"""生成时间: {summary_data['metadata']['generated_at']}<br/>
+使用模型: {summary_data['metadata']['model_used']}<br/>
+分段数量: {summary_data['metadata']['total_segments']}<br/>
+原文长度: {summary_data['metadata']['original_length']}字"""
+        
+        info = Paragraph(info_text, styles['Normal'])
+        story.append(info)
+        story.append(Spacer(1, 12))
+        
+        # 总体总结
+        summary_title = Paragraph("总体总结", styles['Heading2'])
+        story.append(summary_title)
+        summary_content = Paragraph(summary_data['overall_summary'], styles['Normal'])
+        story.append(summary_content)
+        story.append(Spacer(1, 12))
+        
+        # 主要主题
+        if summary_data['topics']:
+            topics_title = Paragraph("主要主题", styles['Heading2'])
+            story.append(topics_title)
+            topics_text = "<br/>".join([f"{i}. {topic}" for i, topic in enumerate(summary_data['topics'], 1)])
+            topics_content = Paragraph(topics_text, styles['Normal'])
+            story.append(topics_content)
+            story.append(Spacer(1, 12))
+        
+        # 分段总结
+        segments_title = Paragraph("分段总结", styles['Heading2'])
+        story.append(segments_title)
+        
+        for segment in summary_data['segments']:
+            segment_title_text = f"第{segment['index']}段"
+            if segment['start_time']:
+                segment_title_text += f" ({segment['start_time']})"
+            
+            segment_title = Paragraph(segment_title_text, styles['Heading3'])
+            story.append(segment_title)
+            
+            segment_content = Paragraph(segment['summary'], styles['Normal'])
+            story.append(segment_content)
+            
+            if segment['keywords']:
+                keywords_text = f"关键词: {', '.join(segment['keywords'])}"
+                keywords = Paragraph(keywords_text, styles['Normal'])
+                story.append(keywords)
+            
+            story.append(Spacer(1, 12))
+        
+        # 构建PDF
+        doc.build(story)
+        return output_path 

@@ -1,0 +1,65 @@
+# AI模型配置示例
+# 复制此文件为 config.yaml 并填入您的API密钥
+
+ai_models:
+  # OpenAI GPT 模型
+  openai:
+    name: "OpenAI GPT"
+    base_url: "https://api.openai.com/v1"
+    api_key: ""  # 请填入您的OpenAI API密钥
+    model: "gpt-4o-mini"  # 可选: gpt-3.5-turbo, gpt-4, gpt-4o等
+    max_tokens: 4000
+    temperature: 0.3
+  
+  # Claude API (Anthropic)
+  claude:
+    name: "Claude"
+    base_url: "https://api.anthropic.com/v1"
+    api_key: ""  # 请填入您的Claude API密钥
+    model: "claude-3-haiku-20240307"  # 可选: claude-3-sonnet-20240229等
+    max_tokens: 4000
+    temperature: 0.3
+  
+  # 自定义OpenAI兼容API (如本地部署的模型)
+  custom:
+    name: "自定义模型"
+    base_url: "http://localhost:11434/v1"  # 示例：ollama本地API地址
+    api_key: "ollama"  # 某些本地API不需要真实密钥
+    model: "qwen2.5:7b"  # 示例模型名称
+    max_tokens: 4000
+    temperature: 0.3
+
+# 总结功能配置
+summarization:
+  # 分段设置
+  segmentation:
+    min_segment_length: 300   # 最小段落字数
+    max_segment_length: 1500  # 最大段落字数
+    overlap_ratio: 0.1        # 段落重叠比例，用于保持上下文连贯
+  
+  # 总结设置
+  summary:
+    segment_summary_length: "1-2句话"     # 分段总结长度
+    overall_summary_length: "200-300字"  # 总体总结长度
+    include_keywords: true                # 是否包含关键词提取
+    include_topics: true                  # 是否包含主题分析
+
+# 高级功能配置
+advanced_features:
+  # 深度分析功能（基于prompt.txt）
+  deep_analysis:
+    enabled: true
+    use_prompt_file: true
+    prompt_file_path: "prompt.txt"
+  
+  # 输出格式
+  output_formats:
+    - "markdown"
+    - "pdf"
+    - "txt"
+
+# 使用说明：
+# 1. 将此文件复制为 config.yaml
+# 2. 在对应的 api_key 字段中填入您的API密钥
+# 3. 根据需要调整模型名称和参数
+# 4. 不使用的模型可以留空 api_key 或删除整个配置块 
