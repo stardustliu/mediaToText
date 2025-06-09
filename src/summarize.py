@@ -3,6 +3,7 @@ import re
 import yaml
 import requests
 import json
+import time
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 import streamlit as st
@@ -15,81 +16,123 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import io
 
+from progress_manager import ProgressManager, TaskProgress
+
 
 class AIModelClient:
     """统一的AI模型客户端，支持OpenAI API风格的多种模型"""
     
-    def __init__(self, model_config: Dict):
+    def __init__(self, model_config: Dict, retry_config: Dict = None):
         self.config = model_config
         self.base_url = model_config['base_url'].rstrip('/')
         self.api_key = model_config['api_key']
         self.model = model_config['model']
         self.max_tokens = model_config.get('max_tokens', 4000)
         self.temperature = model_config.get('temperature', 0.3)
+        
+        # 重试配置
+        self.retry_config = retry_config or {}
+        self.max_attempts = self.retry_config.get('max_attempts', 3)
+        self.delay_seconds = self.retry_config.get('delay_seconds', 5)
+        self.exponential_backoff = self.retry_config.get('exponential_backoff', True)
+        self.timeout_seconds = self.retry_config.get('timeout_seconds', 60)
     
     def _is_anthropic_api(self) -> bool:
         """检查是否为Anthropic Claude API"""
         return 'anthropic.com' in self.base_url
     
+    def _calculate_delay(self, attempt: int) -> float:
+        """计算重试延迟时间"""
+        if self.exponential_backoff:
+            return self.delay_seconds * (2 ** (attempt - 1))
+        return self.delay_seconds
+    
     def call_api(self, messages: List[Dict], system_prompt: str = "") -> str:
-        """调用AI API进行文本生成"""
-        try:
-            headers = {
-                'Content-Type': 'application/json'
-            }
-            
-            # 根据不同API设置认证头
-            if self._is_anthropic_api():
-                headers['x-api-key'] = self.api_key
-                headers['anthropic-version'] = '2023-06-01'
-                
-                # Claude API格式
-                data = {
-                    'model': self.model,
-                    'max_tokens': self.max_tokens,
-                    'temperature': self.temperature,
-                    'messages': messages
-                }
-                if system_prompt:
-                    data['system'] = system_prompt
-                
-                url = f"{self.base_url}/messages"
-            else:
-                # OpenAI API格式
-                headers['Authorization'] = f'Bearer {self.api_key}'
-                
-                # 构建消息列表
-                api_messages = []
-                if system_prompt:
-                    api_messages.append({"role": "system", "content": system_prompt})
-                api_messages.extend(messages)
-                
-                data = {
-                    'model': self.model,
-                    'messages': api_messages,
-                    'max_tokens': self.max_tokens,
-                    'temperature': self.temperature
+        """调用AI API进行文本生成，包含重试机制"""
+        last_error = None
+        
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                headers = {
+                    'Content-Type': 'application/json'
                 }
                 
-                url = f"{self.base_url}/chat/completions"
-            
-            response = requests.post(url, headers=headers, json=data, timeout=60)
-            response.raise_for_status()
-            
-            result = response.json()
-            
-            # 解析不同API的响应格式
-            if self._is_anthropic_api():
-                return result['content'][0]['text']
-            else:
-                return result['choices'][0]['message']['content']
+                # 根据不同API设置认证头
+                if self._is_anthropic_api():
+                    headers['x-api-key'] = self.api_key
+                    headers['anthropic-version'] = '2023-06-01'
+                    
+                    # Claude API格式
+                    data = {
+                        'model': self.model,
+                        'max_tokens': self.max_tokens,
+                        'temperature': self.temperature,
+                        'messages': messages
+                    }
+                    if system_prompt:
+                        data['system'] = system_prompt
+                    
+                    url = f"{self.base_url}/messages"
+                else:
+                    # OpenAI API格式
+                    headers['Authorization'] = f'Bearer {self.api_key}'
+                    
+                    # 构建消息列表
+                    api_messages = []
+                    if system_prompt:
+                        api_messages.append({"role": "system", "content": system_prompt})
+                    api_messages.extend(messages)
+                    
+                    data = {
+                        'model': self.model,
+                        'messages': api_messages,
+                        'max_tokens': self.max_tokens,
+                        'temperature': self.temperature
+                    }
+                    
+                    url = f"{self.base_url}/chat/completions"
                 
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"API调用失败: {str(e)}")
-        except KeyError as e:
-            raise Exception(f"API响应格式错误: {str(e)}")
-        except Exception as e:
-            raise Exception(f"未知错误: {str(e)}")
+                response = requests.post(url, headers=headers, json=data, timeout=self.timeout_seconds)
+                response.raise_for_status()
+                
+                result = response.json()
+                
+                # 解析不同API的响应格式
+                if self._is_anthropic_api():
+                    return result['content'][0]['text']
+                else:
+                    return result['choices'][0]['message']['content']
+                    
+            except requests.exceptions.Timeout as e:
+                last_error = f"请求超时 (第{attempt}次尝试): {str(e)}"
+                
+            except requests.exceptions.RequestException as e:
+                # 检查是否为速率限制错误
+                if hasattr(e, 'response') and e.response is not None:
+                    if e.response.status_code == 429:  # 速率限制
+                        last_error = f"API速率限制 (第{attempt}次尝试): {str(e)}"
+                    elif e.response.status_code >= 500:  # 服务器错误
+                        last_error = f"服务器错误 (第{attempt}次尝试): {str(e)}"
+                    else:
+                        # 客户端错误，通常不需要重试
+                        raise Exception(f"API调用失败: {str(e)}")
+                else:
+                    last_error = f"网络错误 (第{attempt}次尝试): {str(e)}"
+                    
+            except KeyError as e:
+                raise Exception(f"API响应格式错误: {str(e)}")
+                
+            except Exception as e:
+                last_error = f"未知错误 (第{attempt}次尝试): {str(e)}"
+            
+            # 如果不是最后一次尝试，则等待后重试
+            if attempt < self.max_attempts:
+                delay = self._calculate_delay(attempt)
+                st.info(f"第{attempt}次尝试失败，{delay:.1f}秒后重试... ({last_error})")
+                time.sleep(delay)
+        
+        # 所有重试都失败了
+        raise Exception(f"API调用失败，已重试{self.max_attempts}次: {last_error}")
 
 
 class TextSegmenter:
@@ -212,11 +255,20 @@ class PodcastSummarizer:
     
     def __init__(self, config_path: str = "config.yaml"):
         self.config = self._load_config(config_path)
+        if not self.config:
+            return
+            
         self.segmenter = TextSegmenter(
             min_length=self.config['summarization']['segmentation']['min_segment_length'],
             max_length=self.config['summarization']['segmentation']['max_segment_length'],
             overlap_ratio=self.config['summarization']['segmentation']['overlap_ratio']
         )
+        
+        # 初始化进度管理器
+        self.progress_manager = ProgressManager(self.config)
+        
+        # 获取重试配置
+        self.retry_config = self.config.get('retry', {})
     
     def _load_config(self, config_path: str) -> Dict:
         """加载配置文件"""
@@ -238,8 +290,27 @@ class PodcastSummarizer:
                 models[key] = model_config['name']
         return models
     
-    def summarize_transcript(self, text: str, model_key: str, progress_callback=None) -> Dict:
-        """对转录文本进行总结"""
+    def list_incomplete_tasks(self) -> List[TaskProgress]:
+        """获取未完成的任务列表"""
+        return self.progress_manager.list_incomplete_tasks()
+    
+    def create_new_task(self, media_title: str, model_key: str) -> TaskProgress:
+        """创建新的总结任务"""
+        task_id = self.progress_manager.generate_task_id(media_title)
+        task = TaskProgress(task_id, media_title, model_key)
+        self.progress_manager.save_task(task)
+        return task
+    
+    def resume_task(self, task_id: str) -> Optional[TaskProgress]:
+        """恢复已存在的任务"""
+        return self.progress_manager.load_task(task_id)
+    
+    def delete_task(self, task_id: str) -> bool:
+        """删除任务"""
+        return self.progress_manager.delete_task(task_id)
+    
+    def summarize_transcript(self, text: str, model_key: str, progress_callback=None, task: TaskProgress = None) -> Dict:
+        """对转录文本进行总结，支持断点续传"""
         if not self.config:
             raise Exception("配置文件加载失败")
         
@@ -250,57 +321,181 @@ class PodcastSummarizer:
         if not model_config.get('api_key'):
             raise Exception(f"模型 {model_key} 的API密钥未配置")
         
-        client = AIModelClient(model_config)
+        client = AIModelClient(model_config, self.retry_config)
         
-        # 1. 智能分段
-        if progress_callback:
-            progress_callback(0.1, "正在进行智能分段...")
+        # 如果没有传入任务，创建新任务
+        if task is None:
+            # 这里应该从外部传入media_title，暂时使用截取的文本前50字符
+            media_title = text[:50].replace('\n', ' ').strip()
+            task = self.create_new_task(media_title, model_key)
         
-        segments = self.segmenter.segment_by_topic(text)
-        
-        # 2. 分段总结
-        segment_summaries = []
-        total_segments = len(segments)
-        
-        for i, segment in enumerate(segments):
-            if progress_callback:
-                progress = 0.1 + (i / total_segments) * 0.7  # 10%-80%用于分段总结
-                progress_callback(progress, f"正在总结第 {i+1}/{total_segments} 段...")
+        try:
+            # 1. 智能分段（如果还没有分段过）
+            if task.total_segments == 0:
+                if progress_callback:
+                    progress_callback(0.05, "正在进行智能分段...")
+                
+                segments = self.segmenter.segment_by_topic(text)
+                task.total_segments = len(segments)
+                task.status = "segments_in_progress"
+                self.progress_manager.save_task(task)
+            else:
+                # 重新分段（用于恢复任务）
+                segments = self.segmenter.segment_by_topic(text)
             
-            summary = self._summarize_segment(client, segment['content'], i+1)
-            segment_summaries.append({
-                'index': segment['index'],
-                'start_time': segment['start_time'],
-                'original_length': segment['length'],
-                'summary': summary,
-                'keywords': self._extract_keywords(client, segment['content']) if self.config['summarization']['summary']['include_keywords'] else []
-            })
-        
-        # 3. 总体总结
-        if progress_callback:
-            progress_callback(0.85, "正在生成总体总结...")
-        
-        overall_summary = self._generate_overall_summary(client, segment_summaries, text)
-        
-        # 4. 主题分析
-        topics = []
-        if self.config['summarization']['summary']['include_topics']:
+            # 2. 分段总结（支持断点续传）
+            remaining_segments = self.progress_manager.get_next_segments_to_process(task, segments)
+            total_segments = len(segments)
+            completed_count = len(task.completed_segments)
+            
             if progress_callback:
-                progress_callback(0.95, "正在进行主题分析...")
-            topics = self._analyze_topics(client, text)
-        
-        if progress_callback:
-            progress_callback(1.0, "总结完成！")
-        
+                progress_callback(0.1, f"准备处理剩余 {len(remaining_segments)} 个分段...")
+            
+            for i, segment in enumerate(remaining_segments):
+                try:
+                    if progress_callback:
+                        current_progress = 0.1 + ((completed_count + i) / total_segments) * 0.7  # 10%-80%用于分段总结
+                        progress_callback(current_progress, f"正在总结第 {segment['index']}/{total_segments} 段...")
+                    
+                    # 总结单个分段
+                    summary = self._summarize_segment(client, segment['content'], segment['index'])
+                    keywords = []
+                    
+                    # 提取关键词（如果启用）
+                    if self.config['summarization']['summary']['include_keywords']:
+                        try:
+                            keywords = self._extract_keywords(client, segment['content'])
+                        except Exception as e:
+                            st.warning(f"第{segment['index']}段关键词提取失败: {str(e)}")
+                    
+                    # 保存分段结果
+                    segment_data = {
+                        'index': segment['index'],
+                        'start_time': segment.get('start_time'),
+                        'original_length': segment['length'],
+                        'summary': summary,
+                        'keywords': keywords
+                    }
+                    
+                    task.add_completed_segment(segment_data)
+                    self.progress_manager.save_task(task)  # 立即保存进度
+                    
+                    if progress_callback:
+                        completed_percentage = len(task.completed_segments) / total_segments * 100
+                        progress_callback(current_progress, f"第 {segment['index']} 段完成 ({completed_percentage:.1f}%)")
+                
+                except Exception as e:
+                    error_msg = str(e)
+                    st.error(f"第{segment['index']}段总结失败: {error_msg}")
+                    task.add_failed_segment(segment['index'], error_msg)
+                    self.progress_manager.save_task(task)
+                    
+                    # 继续处理下一个分段，不中断整个流程
+                    continue
+            
+            # 3. 检查分段总结是否完成
+            all_segments_completed = len(task.completed_segments) == total_segments
+            if not all_segments_completed:
+                # 更新任务状态但不继续总体总结
+                failed_count = len(task.failed_segments)
+                completed_count = len(task.completed_segments)
+                
+                if failed_count > 0:
+                    task.status = "segments_in_progress"  # 有失败的分段
+                    if progress_callback:
+                        progress_callback(0.8, f"分段总结部分完成: {completed_count}/{total_segments} 成功, {failed_count} 失败")
+                else:
+                    task.status = "segments_completed"
+                    if progress_callback:
+                        progress_callback(0.8, f"分段总结完成: {completed_count}/{total_segments}")
+                
+                self.progress_manager.save_task(task)
+                
+                # 返回部分结果
+                return self._create_partial_result(task, text)
+            
+            # 4. 总体总结（只有在所有分段都完成时才执行）
+            if task.overall_summary is None:
+                try:
+                    if progress_callback:
+                        progress_callback(0.85, "正在生成总体总结...")
+                    
+                    task.overall_summary = self._generate_overall_summary(client, task.completed_segments, text)
+                    self.progress_manager.save_task(task)
+                    
+                except Exception as e:
+                    st.error(f"总体总结失败: {str(e)}")
+                    task.status = "segments_completed"  # 分段完成但总体总结失败
+                    self.progress_manager.save_task(task)
+                    return self._create_partial_result(task, text)
+            
+            # 5. 主题分析（如果启用且还没完成）
+            if task.topics is None and self.config['summarization']['summary']['include_topics']:
+                try:
+                    if progress_callback:
+                        progress_callback(0.95, "正在进行主题分析...")
+                    
+                    task.topics = self._analyze_topics(client, text)
+                    self.progress_manager.save_task(task)
+                    
+                except Exception as e:
+                    st.warning(f"主题分析失败: {str(e)}")
+                    task.topics = []  # 设置为空列表表示已尝试过
+                    self.progress_manager.save_task(task)
+            
+            # 6. 完成任务
+            task.status = "overall_completed"
+            self.progress_manager.save_task(task)
+            
+            if progress_callback:
+                progress_callback(1.0, "总结完成！")
+            
+            return self._create_final_result(task, text)
+            
+        except Exception as e:
+            # 保存错误信息
+            task.error_info = str(e)
+            task.status = "failed"
+            self.progress_manager.save_task(task)
+            raise e
+    
+    def _create_partial_result(self, task: TaskProgress, original_text: str) -> Dict:
+        """创建部分结果（用于分段总结完成但总体总结未完成的情况）"""
         return {
-            'segments': segment_summaries,
-            'overall_summary': overall_summary,
-            'topics': topics,
+            'segments': task.completed_segments,
+            'overall_summary': task.overall_summary or "总体总结尚未完成，请继续任务以生成完整总结",
+            'topics': task.topics or [],
             'metadata': {
-                'total_segments': len(segments),
-                'original_length': len(text),
-                'model_used': model_config['name'],
-                'generated_at': datetime.now().isoformat()
+                'total_segments': task.total_segments,
+                'completed_segments_count': len(task.completed_segments),
+                'failed_segments_count': len(task.failed_segments),
+                'original_length': len(original_text),
+                'model_used': self.config['ai_models'][task.model_key]['name'],
+                'generated_at': task.updated_at,
+                'task_id': task.task_id,
+                'progress_percentage': task.get_progress_percentage(),
+                'status': task.status,
+                'is_partial': True
+            }
+        }
+    
+    def _create_final_result(self, task: TaskProgress, original_text: str) -> Dict:
+        """创建最终结果"""
+        return {
+            'segments': task.completed_segments,
+            'overall_summary': task.overall_summary,
+            'topics': task.topics or [],
+            'metadata': {
+                'total_segments': task.total_segments,
+                'completed_segments_count': len(task.completed_segments),
+                'failed_segments_count': len(task.failed_segments),
+                'original_length': len(original_text),
+                'model_used': self.config['ai_models'][task.model_key]['name'],
+                'generated_at': task.updated_at,
+                'task_id': task.task_id,
+                'progress_percentage': 100.0,
+                'status': task.status,
+                'is_partial': False
             }
         }
     

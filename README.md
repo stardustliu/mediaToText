@@ -14,6 +14,11 @@
   - 整体内容概览
   - 关键词和主题提取
   - 深度分析（基于prompt.txt）
+- 🔄 **强大的容错机制**
+  - 自动重试机制（可配置次数和间隔）
+  - 断点续传功能，API超时后可继续
+  - 分段进度实时保存，避免重复工作
+  - 任务状态管理，支持恢复未完成任务
 - 🎯 支持导出 TXT、SRT、PDF、Markdown 格式
 - 💻 简洁直观的 Web 界面
 - ⏱️ 实时显示下载和转录进度
@@ -62,6 +67,20 @@ ai_models:
     base_url: "http://localhost:11434/v1"
     api_key: "ollama"
     model: "qwen2.5:7b"
+
+# 容错机制配置
+retry:
+  max_attempts: 3           # 最大重试次数
+  delay_seconds: 5          # 重试间隔秒数
+  exponential_backoff: true # 是否使用指数退避
+  timeout_seconds: 60       # API调用超时时间
+
+# 进度管理配置
+progress:
+  save_directory: "progress"     # 进度文件保存目录
+  auto_save: true                # 是否自动保存进度
+  keep_completed_tasks: 7        # 保留已完成任务的天数
+  task_cleanup_enabled: true     # 是否启用任务清理
 ```
 
 ### 支持的AI模型
@@ -93,11 +112,18 @@ streamlit run src/app.py
 - 点击"开始转录"进行音频转文字
 
 ### 第三步：AI智能总结（新功能）
+- **任务管理**：
+  - 自动检测未完成的任务
+  - 支持恢复中断的总结任务
+  - 显示任务进度和状态
+  - 失败重试和错误处理
+
 - **基础总结**：
   - 选择AI模型
   - 点击"开始智能总结"
   - 获得智能分段总结、整体概览、关键词和主题分析
   - 支持导出为TXT、Markdown、PDF格式
+  - **断点续传**：API超时或失败时，已完成的分段会保存，可以继续执行
 
 - **高级分析**：
   - 基于 `prompt.txt` 进行深度内容分析
@@ -109,26 +135,54 @@ streamlit run src/app.py
 - 下载AI总结报告
 - 下载深度分析报告
 
+## 容错机制说明
+
+本工具内置了强大的容错机制，确保长时间运行的AI总结任务的稳定性：
+
+### 1. 自动重试机制
+- API调用失败时自动重试（默认3次）
+- 支持指数退避策略，减少服务器压力
+- 可配置重试次数和间隔时间
+
+### 2. 断点续传功能
+- 每个分段完成后立即保存进度
+- API超时或网络中断时，已完成的工作不会丢失
+- 可以从中断点继续执行，避免重复计算
+
+### 3. 任务状态管理
+- 任务保存在 `progress/` 目录中
+- 使用媒体标题+UUID作为唯一标识
+- 支持查看和管理未完成的任务
+
+### 4. 智能错误处理
+- 区分不同类型的错误（网络、API限制、服务器错误等）
+- 对可恢复的错误进行重试
+- 对不可恢复的错误立即停止并保存状态
+
 ## 文件结构
 
 ```
 ├── src/
-│   ├── app.py          # 主应用程序
-│   ├── download.py     # 下载功能模块
-│   ├── transcribe.py   # 转录功能模块
-│   └── summarize.py    # AI总结功能模块
-├── config.yaml         # AI模型配置文件
-├── prompt.txt          # 深度分析提示词模板
-├── requirements.txt    # 依赖项列表
-└── README.md          # 使用说明
+│   ├── app.py              # 主应用程序
+│   ├── download.py         # 下载功能模块
+│   ├── transcribe.py       # 转录功能模块
+│   ├── summarize.py        # AI总结功能模块
+│   └── progress_manager.py # 进度管理模块
+├── progress/               # 任务进度保存目录
+├── config.yaml             # AI模型配置文件
+├── prompt.txt              # 深度分析提示词模板
+├── requirements.txt        # 依赖项列表
+├── test_progress_manager.py # 容错机制测试脚本
+└── README.md              # 使用说明
 ```
 
 ## 注意事项
 
 - 转录速度与设备性能相关，一分钟音频约需要 10 秒转录时间
 - AI总结功能需要网络连接和有效的API密钥
-- 大型音频文件的总结可能需要较长时间
+- 大型音频文件的总结可能需要较长时间，但支持断点续传
 - 请确保API密钥安全，不要在公共场所暴露
+- `progress/` 目录包含任务进度文件，请不要手动修改
 
 ## 技术栈
 
@@ -148,6 +202,15 @@ streamlit run src/app.py
 <img width="1191" alt="image" src="https://github.com/user-attachments/assets/d4c69b9a-e654-4ea6-8289-f973705f6a48" />
 
 ## 更新日志
+
+### v2.1 (容错机制增强版)
+- 🔄 新增强大的容错机制
+- 📂 任务进度保存到 progress/ 目录
+- 🆔 使用媒体标题+UUID生成任务标识
+- 🔁 自动重试机制（可配置次数和间隔）
+- ⏸️ 断点续传功能，API超时后可继续
+- 📋 任务管理界面，支持恢复未完成任务
+- 🧪 添加测试脚本验证功能
 
 ### v2.0 (新增AI总结功能)
 - ✨ 新增AI智能总结功能

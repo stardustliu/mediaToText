@@ -44,6 +44,20 @@ summarization:
     include_keywords: true                # 是否包含关键词提取
     include_topics: true                  # 是否包含主题分析
 
+# 重试和错误处理配置
+retry:
+  max_attempts: 3           # 最大重试次数
+  delay_seconds: 5          # 重试间隔秒数
+  exponential_backoff: true # 是否使用指数退避
+  timeout_seconds: 60       # API调用超时时间
+
+# 进度管理配置
+progress:
+  save_directory: "progress"     # 进度文件保存目录
+  auto_save: true                # 是否自动保存进度
+  keep_completed_tasks: 7        # 保留已完成任务的天数
+  task_cleanup_enabled: true     # 是否启用任务清理
+
 # 高级功能配置
 advanced_features:
   # 深度分析功能（基于prompt.txt）
@@ -62,4 +76,5 @@ advanced_features:
 # 1. 将此文件复制为 config.yaml
 # 2. 在对应的 api_key 字段中填入您的API密钥
 # 3. 根据需要调整模型名称和参数
-# 4. 不使用的模型可以留空 api_key 或删除整个配置块 
+# 4. 根据需要调整重试和进度管理设置
+# 5. 不使用的模型可以留空 api_key 或删除整个配置块 

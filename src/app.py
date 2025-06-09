@@ -443,7 +443,8 @@ if st.session_state.transcribe_completed and st.session_state.transcript:
             st.info("请在config.yaml文件中配置至少一个AI模型的API密钥")
             
             # 显示配置示例
-            with st.expander("📖 配置说明"):
+            show_config_help = st.checkbox("📖 查看配置说明", value=False)
+            if show_config_help:
                 st.code("""
 # 在config.yaml中配置API密钥，例如：
 ai_models:
@@ -453,6 +454,97 @@ ai_models:
     api_key: "your_claude_api_key_here"
                 """)
         else:
+            # 检查是否有未完成的任务
+            incomplete_tasks = st.session_state.summarizer.list_incomplete_tasks()
+            
+            # 任务管理界面
+            if incomplete_tasks:
+                st.subheader("📋 任务管理")
+                
+                # 显示未完成任务
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"发现 {len(incomplete_tasks)} 个未完成的任务：")
+                with col2:
+                    if st.button("🗑️ 清理所有任务", help="删除所有未完成的任务"):
+                        for task in incomplete_tasks:
+                            st.session_state.summarizer.delete_task(task.task_id)
+                        st.success("已清理所有任务")
+                        st.rerun()
+                
+                # 选择任务
+                task_options = {}
+                for task in incomplete_tasks:
+                    info = st.session_state.summarizer.progress_manager.format_task_display_info(task)
+                    display_text = f"📄 {info['title'][:30]}... | {info['progress']} | {info['status']} | {info['updated']}"
+                    task_options[display_text] = task.task_id
+                
+                selected_task_display = st.selectbox(
+                    "选择要恢复的任务：",
+                    ["创建新任务"] + list(task_options.keys()),
+                    help="选择一个未完成的任务继续执行，或创建新任务"
+                )
+                
+                if selected_task_display != "创建新任务":
+                    selected_task_id = task_options[selected_task_display]
+                    selected_task = st.session_state.summarizer.resume_task(selected_task_id)
+                    
+                    if selected_task:
+                        # 显示任务详情
+                        with st.container():
+                            st.write("**任务详情：**")
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("完成进度", f"{selected_task.get_progress_percentage():.1f}%")
+                            with col2:
+                                st.metric("完成分段", f"{len(selected_task.completed_segments)}/{selected_task.total_segments}")
+                            with col3:
+                                st.metric("失败分段", len(selected_task.failed_segments))
+                            
+                            if selected_task.failed_segments:
+                                st.warning(f"有 {len(selected_task.failed_segments)} 个分段失败，将尝试重新处理")
+                        
+                        # 继续任务按钮
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if st.button("🔄 继续任务", key="continue_task"):
+                                try:
+                                    progress_bar = st.progress(selected_task.get_progress_percentage() / 100)
+                                    status_text = st.empty()
+                                    
+                                    def update_progress(progress, message):
+                                        progress_bar.progress(progress)
+                                        status_text.text(message)
+                                    
+                                    # 继续执行任务
+                                    summary_result = st.session_state.summarizer.summarize_transcript(
+                                        st.session_state.transcript,
+                                        selected_task.model_key,
+                                        progress_callback=update_progress,
+                                        task=selected_task
+                                    )
+                                    
+                                    st.session_state.summary_data = summary_result
+                                    st.session_state.summarize_completed = True
+                                    
+                                    status_text.text("任务完成！")
+                                    st.success("✅ 任务继续执行完成")
+                                    st.rerun()
+                                    
+                                except Exception as e:
+                                    st.error(f"继续任务失败：{str(e)}")
+                        
+                        with col2:
+                            if st.button("🗑️ 删除任务", key="delete_selected_task"):
+                                if st.session_state.summarizer.delete_task(selected_task.task_id):
+                                    st.success("任务已删除")
+                                    st.rerun()
+                                else:
+                                    st.error("删除任务失败")
+                    
+                    # 分隔线
+                    st.divider()
+            
             # AI模型选择
             selected_model = st.selectbox(
                 "选择AI模型：",
@@ -469,6 +561,7 @@ ai_models:
                 st.write("• 分段简洁总结（1-2句话）")
                 st.write("• 整体内容概览")
                 st.write("• 关键词和主题提取")
+                st.write("• 支持断点续传，失败后可继续")
                 
                 # 分段总结设置
                 col1, col2 = st.columns(2)
@@ -487,11 +580,18 @@ ai_models:
                                 progress_bar.progress(progress)
                                 status_text.text(message)
                             
+                            # 创建新任务
+                            new_task = st.session_state.summarizer.create_new_task(
+                                st.session_state.media_title, 
+                                selected_model
+                            )
+                            
                             # 执行总结
                             summary_result = st.session_state.summarizer.summarize_transcript(
                                 st.session_state.transcript,
                                 selected_model,
-                                progress_callback=update_progress
+                                progress_callback=update_progress,
+                                task=new_task
                             )
                             
                             st.session_state.summary_data = summary_result
@@ -505,6 +605,8 @@ ai_models:
                             st.error(f"总结失败：{str(e)}")
                             if "API" in str(e):
                                 st.info("💡 请检查API密钥是否正确配置，以及网络连接是否正常")
+                            elif "重试" in str(e):
+                                st.info("💡 任务已保存，您可以稍后从任务管理中继续执行")
                     else:
                         st.error("未找到转录文本")
             
