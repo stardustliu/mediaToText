@@ -673,8 +673,10 @@ ai_models:
                     with col2:
                         if segment['keywords']:
                             st.write("**关键词:**")
+                            keywords_html = ""
                             for kw in segment['keywords']:
-                                st.badge(kw)
+                                keywords_html += f'<span style="background-color: #f0f2f6; color: #262730; padding: 2px 8px; margin: 2px; border-radius: 12px; font-size: 12px; display: inline-block;">{kw}</span> '
+                            st.markdown(keywords_html, unsafe_allow_html=True)
                     st.divider()
             
             # 导出选项
