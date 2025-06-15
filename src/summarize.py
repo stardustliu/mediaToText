@@ -269,6 +269,19 @@ class PodcastSummarizer:
         
         # 获取重试配置
         self.retry_config = self.config.get('retry', {})
+        
+        # 失败分段重试配置
+        self.failed_segment_retry = {
+            'max_attempts': 3,  # 失败分段最大重试次数
+            'base_delay': 10,   # 基础延迟时间（秒）
+            'max_delay': 60,    # 最大延迟时间（秒）
+            'error_types': {    # 错误类型对应的重试策略
+                'timeout': {'retry': True, 'delay_multiplier': 2},
+                'rate_limit': {'retry': True, 'delay_multiplier': 3},
+                'server_error': {'retry': True, 'delay_multiplier': 1.5},
+                'network_error': {'retry': True, 'delay_multiplier': 1.2}
+            }
+        }
     
     def _load_config(self, config_path: str) -> Dict:
         """加载配置文件"""
@@ -309,6 +322,100 @@ class PodcastSummarizer:
         """删除任务"""
         return self.progress_manager.delete_task(task_id)
     
+    def _should_retry_failed_segment(self, error_msg: str) -> Tuple[bool, float]:
+        """判断是否应该重试失败的分段，并返回延迟时间"""
+        error_msg = error_msg.lower()
+        
+        # 根据错误信息判断错误类型
+        error_type = None
+        if 'timeout' in error_msg or 'timed out' in error_msg:
+            error_type = 'timeout'
+        elif 'rate limit' in error_msg or 'too many requests' in error_msg:
+            error_type = 'rate_limit'
+        elif 'server error' in error_msg or '500' in error_msg:
+            error_type = 'server_error'
+        elif 'network' in error_msg or 'connection' in error_msg:
+            error_type = 'network_error'
+        
+        if error_type and error_type in self.failed_segment_retry['error_types']:
+            strategy = self.failed_segment_retry['error_types'][error_type]
+            if strategy['retry']:
+                # 计算延迟时间，使用指数退避
+                delay = min(
+                    self.failed_segment_retry['base_delay'] * strategy['delay_multiplier'],
+                    self.failed_segment_retry['max_delay']
+                )
+                return True, delay
+        
+        return False, 0
+
+    def _retry_failed_segments(self, client: AIModelClient, task: TaskProgress, progress_callback=None) -> None:
+        """重试失败的分段"""
+        if not task.failed_segments:
+            return
+        
+        if progress_callback:
+            progress_callback(0.8, f"正在重试 {len(task.failed_segments)} 个失败的分段...")
+        
+        # 按失败时间排序，优先处理最近失败的分段
+        task.failed_segments.sort(key=lambda x: x.get('failed_at', ''), reverse=True)
+        
+        for failed_segment in task.failed_segments[:]:
+            segment_index = failed_segment['index']
+            error_msg = failed_segment['error']
+            
+            # 检查是否应该重试
+            should_retry, delay = self._should_retry_failed_segment(error_msg)
+            if not should_retry:
+                continue
+            
+            # 等待延迟时间
+            if delay > 0:
+                time.sleep(delay)
+            
+            try:
+                # 获取分段内容
+                segment_content = self.segmenter.get_segment_content(segment_index)
+                if not segment_content:
+                    continue
+                
+                # 重试总结
+                summary = self._summarize_segment(client, segment_content, segment_index)
+                keywords = []
+                
+                # 提取关键词（如果启用）
+                if self.config['summarization']['summary']['include_keywords']:
+                    try:
+                        keywords = self._extract_keywords(client, segment_content)
+                    except Exception as e:
+                        st.warning(f"第{segment_index}段关键词提取失败: {str(e)}")
+                
+                # 保存分段结果
+                segment_data = {
+                    'index': segment_index,
+                    'original_length': len(segment_content),
+                    'summary': summary,
+                    'keywords': keywords
+                }
+                
+                task.add_completed_segment(segment_data)
+                # 从失败列表中移除
+                task.failed_segments.remove(failed_segment)
+                self.progress_manager.save_task(task)
+                
+                if progress_callback:
+                    completed_percentage = len(task.completed_segments) / task.total_segments * 100
+                    progress_callback(0.8 + (completed_percentage * 0.1), f"第 {segment_index} 段重试成功")
+            
+            except Exception as e:
+                # 更新失败信息
+                failed_segment['error'] = str(e)
+                failed_segment['failed_at'] = datetime.now().isoformat()
+                self.progress_manager.save_task(task)
+                
+                if progress_callback:
+                    progress_callback(0.8, f"第 {segment_index} 段重试失败: {str(e)}")
+
     def summarize_transcript(self, text: str, model_key: str, progress_callback=None, task: TaskProgress = None) -> Dict:
         """对转录文本进行总结，支持断点续传"""
         if not self.config:
@@ -393,7 +500,11 @@ class PodcastSummarizer:
                     # 继续处理下一个分段，不中断整个流程
                     continue
             
-            # 3. 检查分段总结是否完成
+            # 3. 重试失败的分段
+            if task.failed_segments:
+                self._retry_failed_segments(client, task, progress_callback)
+            
+            # 4. 检查分段总结是否完成
             all_segments_completed = len(task.completed_segments) == total_segments
             if not all_segments_completed:
                 # 更新任务状态但不继续总体总结
@@ -414,7 +525,7 @@ class PodcastSummarizer:
                 # 返回部分结果
                 return self._create_partial_result(task, text)
             
-            # 4. 总体总结（只有在所有分段都完成时才执行）
+            # 5. 总体总结（只有在所有分段都完成时才执行）
             if task.overall_summary is None:
                 try:
                     if progress_callback:
@@ -429,7 +540,7 @@ class PodcastSummarizer:
                     self.progress_manager.save_task(task)
                     return self._create_partial_result(task, text)
             
-            # 5. 主题分析（如果启用且还没完成）
+            # 6. 主题分析（如果启用且还没完成）
             if task.topics is None and self.config['summarization']['summary']['include_topics']:
                 try:
                     if progress_callback:
@@ -443,7 +554,7 @@ class PodcastSummarizer:
                     task.topics = []  # 设置为空列表表示已尝试过
                     self.progress_manager.save_task(task)
             
-            # 6. 完成任务
+            # 7. 完成任务
             task.status = "overall_completed"
             self.progress_manager.save_task(task)
             

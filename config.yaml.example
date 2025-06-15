@@ -50,6 +50,25 @@ retry:
   delay_seconds: 5          # 重试间隔秒数
   exponential_backoff: true # 是否使用指数退避
   timeout_seconds: 60       # API调用超时时间
+  
+  # 失败分段重试配置
+  failed_segment:
+    max_attempts: 3  # 失败分段最大重试次数
+    base_delay: 10   # 基础延迟时间（秒）
+    max_delay: 60    # 最大延迟时间（秒）
+    error_types:     # 错误类型对应的重试策略
+      timeout:
+        retry: true
+        delay_multiplier: 2
+      rate_limit:
+        retry: true
+        delay_multiplier: 3
+      server_error:
+        retry: true
+        delay_multiplier: 1.5
+      network_error:
+        retry: true
+        delay_multiplier: 1.2
 
 # 进度管理配置
 progress:
@@ -65,6 +84,9 @@ advanced_features:
     enabled: true
     use_prompt_file: true
     prompt_file_path: "prompt.txt"
+    # 新增：深度分析专用配置
+    chunk_size: 3000  # 对于长文本，分块处理以减少单次API调用复杂度
+    enable_chunking: true  # 启用分块处理
   
   # 输出格式
   output_formats:
