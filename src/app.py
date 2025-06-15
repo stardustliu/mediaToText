@@ -41,6 +41,8 @@ if "deep_analysis_result" not in st.session_state:
     st.session_state.deep_analysis_result = None
 if "summarizer" not in st.session_state:
     st.session_state.summarizer = None
+if "summary_mode" not in st.session_state:
+    st.session_state.summary_mode = "structured"  # 新增：总结模式选择
 
 # 初始化总结器
 @st.cache_resource
@@ -552,206 +554,304 @@ ai_models:
                 format_func=lambda x: available_models[x]
             )
             
-            # 创建两个标签页：基础总结和高级分析
-            tab1, tab2 = st.tabs(["📊 基础总结", "🧠 高级分析"])
+            # 总结模式选择
+            st.subheader("📝 选择总结模式")
             
-            with tab1:
-                st.write("**功能说明：**")
-                st.write("• 智能主题分段")
-                st.write("• 分段简洁总结（1-2句话）")
-                st.write("• 整体内容概览")
-                st.write("• 关键词和主题提取")
-                st.write("• 支持断点续传，失败后可继续")
+            # 使用单选按钮选择总结模式
+            summary_mode = st.radio(
+                "请选择您需要的总结方式：",
+                options=["structured", "deep_analysis"],
+                format_func=lambda x: {
+                    "structured": "📊 结构化总结 - 智能分段 + 关键词提取 + 主题分析",
+                    "deep_analysis": "🧠 深度分析 - 基于自定义模板的专业内容分析"
+                }[x],
+                index=0 if st.session_state.summary_mode == "structured" else 1,
+                help="结构化总结适合快速了解内容要点，深度分析适合生成专业技术文档"
+            )
+            
+            # 更新会话状态
+            st.session_state.summary_mode = summary_mode
+            
+            # 根据选择的模式显示不同的配置选项和说明
+            if summary_mode == "structured":
+                with st.container():
+                    st.write("**结构化总结功能：**")
+                    st.write("• 🎯 智能主题分段，自动识别内容转折点")
+                    st.write("• 📝 每段1-2句话精准总结")
+                    st.write("• 🔍 自动提取关键词和主要主题")
+                    st.write("• 📊 生成完整的内容概览")
+                    st.write("• 💾 支持断点续传，任务管理")
+                    
+                    # 结构化总结的配置选项
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        include_keywords = st.checkbox("包含关键词提取", value=True, help="为每个分段提取3-5个关键词")
+                    with col2:
+                        include_topics = st.checkbox("包含主题分析", value=True, help="分析整体内容的主要主题")
+                    
+                    # 显示是否支持断点续传
+                    st.info("💡 结构化总结支持断点续传功能，如遇网络问题可随时恢复")
+                    
+            else:  # deep_analysis
+                with st.container():
+                    st.write("**深度分析功能：**")
+                    st.write("• 📋 基于专业模板的结构化输出")
+                    st.write("• 🎨 生成适合微信公众号的格式化内容")
+                    st.write("• 📊 包含思维导图和可视化元素")
+                    st.write("• 🔬 深度挖掘内容价值和见解")
+                    st.write("• ✅ 内容质量控制和专业术语处理")
+                    
+                    # 检查prompt.txt文件
+                    if os.path.exists("prompt.txt"):
+                        show_template = st.checkbox("📄 查看分析模板内容", value=False)
+                        if show_template:
+                            with open("prompt.txt", "r", encoding="utf-8") as f:
+                                prompt_content = f.read()
+                            st.code(prompt_content, language="text")
+                        
+                        st.success("✅ 检测到深度分析模板文件 (prompt.txt)")
+                    else:
+                        st.error("❌ 未找到深度分析模板文件 (prompt.txt)")
+                        st.info("请确保prompt.txt文件在项目根目录中，深度分析功能需要此模板文件")
+                        st.stop()  # 阻止继续执行
+            
+            st.divider()
+            
+            # 统一的开始总结按钮
+            if summary_mode == "structured":
+                button_text = "🚀 开始结构化总结"
+                button_key = "start_structured_summary"
+            else:
+                button_text = "🧠 开始深度分析"
+                button_key = "start_deep_analysis"
+            
+            if st.button(button_text, key=button_key, type="primary"):
+                if not st.session_state.transcript:
+                    st.error("未找到转录文本")
+                    st.stop()
                 
-                # 分段总结设置
-                col1, col2 = st.columns(2)
-                with col1:
-                    include_keywords = st.checkbox("包含关键词提取", value=True)
-                with col2:
-                    include_topics = st.checkbox("包含主题分析", value=True)
-                
-                if st.button("🚀 开始智能总结", key="start_summary"):
-                    if st.session_state.transcript:
-                        try:
-                            progress_bar = st.progress(0)
-                            status_text = st.empty()
-                            
-                            def update_progress(progress, message):
-                                progress_bar.progress(progress)
-                                status_text.text(message)
-                            
-                            # 创建新任务
-                            new_task = st.session_state.summarizer.create_new_task(
-                                st.session_state.media_title, 
+                try:
+                    if summary_mode == "structured":
+                        # 结构化总结流程
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        def update_progress(progress, message):
+                            progress_bar.progress(progress)
+                            status_text.text(message)
+                        
+                        # 创建新任务
+                        new_task = st.session_state.summarizer.create_new_task(
+                            st.session_state.media_title, 
+                            selected_model
+                        )
+                        
+                        # 执行结构化总结
+                        summary_result = st.session_state.summarizer.summarize_transcript(
+                            st.session_state.transcript,
+                            selected_model,
+                            progress_callback=update_progress,
+                            task=new_task
+                        )
+                        
+                        st.session_state.summary_data = summary_result
+                        st.session_state.summarize_completed = True
+                        st.session_state.deep_analysis_result = None  # 清除深度分析结果
+                        
+                        status_text.text("结构化总结完成！")
+                        st.success("✅ 结构化总结已完成")
+                        st.rerun()
+                        
+                    else:  # deep_analysis
+                        # 深度分析流程
+                        with st.spinner("正在进行深度分析，这可能需要较长时间..."):
+                            deep_result = st.session_state.summarizer.deep_analysis(
+                                st.session_state.transcript,
                                 selected_model
                             )
                             
-                            # 执行总结
-                            summary_result = st.session_state.summarizer.summarize_transcript(
-                                st.session_state.transcript,
-                                selected_model,
-                                progress_callback=update_progress,
-                                task=new_task
-                            )
+                            st.session_state.deep_analysis_result = deep_result
+                            st.session_state.summarize_completed = False  # 深度分析使用不同的完成标记
+                            st.session_state.summary_data = None  # 清除结构化总结结果
                             
-                            st.session_state.summary_data = summary_result
-                            st.session_state.summarize_completed = True
-                            
-                            status_text.text("总结完成！")
-                            st.success("✅ AI总结已完成")
+                            st.success("✅ 深度分析已完成")
                             st.rerun()
                             
-                        except Exception as e:
-                            st.error(f"总结失败：{str(e)}")
-                            if "API" in str(e):
-                                st.info("💡 请检查API密钥是否正确配置，以及网络连接是否正常")
-                            elif "重试" in str(e):
-                                st.info("💡 任务已保存，您可以稍后从任务管理中继续执行")
-                    else:
-                        st.error("未找到转录文本")
-            
-            with tab2:
-                st.write("**功能说明：**")
-                st.write("• 基于prompt.txt的深度分析")
-                st.write("• 结构化内容输出")
-                st.write("• 专业技术文档格式")
-                st.write("• 适合公众号文章等用途")
-                
-                if os.path.exists("prompt.txt"):
-                    # 使用checkbox代替嵌套的expander
-                    show_template = st.checkbox("📄 查看分析模板", value=False)
-                    if show_template:
-                        with open("prompt.txt", "r", encoding="utf-8") as f:
-                            prompt_content = f.read()
-                        st.code(prompt_content, language="text")
+                except Exception as e:
+                    st.error(f"总结失败：{str(e)}")
                     
-                    if st.button("🧠 开始深度分析", key="start_deep_analysis"):
-                        if st.session_state.transcript:
-                            try:
-                                with st.spinner("正在进行深度分析..."):
-                                    deep_result = st.session_state.summarizer.deep_analysis(
-                                        st.session_state.transcript,
-                                        selected_model
-                                    )
-                                    st.session_state.deep_analysis_result = deep_result
-                                    st.success("✅ 深度分析已完成")
-                                    st.rerun()
-                            except Exception as e:
-                                st.error(f"深度分析失败：{str(e)}")
-                        else:
-                            st.error("未找到转录文本")
-                else:
-                    st.warning("未找到prompt.txt文件，无法进行深度分析")
-                    st.info("请确保prompt.txt文件在项目根目录中")
+                    # 根据错误类型给出不同的提示
+                    error_msg = str(e).lower()
+                    if "api" in error_msg or "key" in error_msg:
+                        st.info("💡 请检查API密钥是否正确配置，以及网络连接是否正常")
+                    elif "重试" in error_msg:
+                        st.info("💡 任务已保存，您可以稍后从任务管理中继续执行")
+                    elif "prompt" in error_msg or "文件" in error_msg:
+                        st.info("💡 请检查prompt.txt文件是否存在且格式正确")
+                    else:
+                        st.info("💡 请检查网络连接和模型配置，或稍后重试")
     
     # 显示总结结果
-    if st.session_state.summary_data:
+    if st.session_state.summary_data or st.session_state.deep_analysis_result:
         results_expander = st.expander("📋 总结结果", expanded=True)
         with results_expander:
-            summary = st.session_state.summary_data
+            # 根据不同的结果类型显示不同的内容
+            if st.session_state.summary_data:
+                # 显示结构化总结结果
+                st.subheader("📊 结构化总结结果")
+                summary = st.session_state.summary_data
+                
+                # 显示总体总结
+                st.subheader("📝 总体总结")
+                st.write(summary['overall_summary'])
+                
+                # 显示主题分析
+                if summary['topics']:
+                    st.subheader("🏷️ 主要主题")
+                    for i, topic in enumerate(summary['topics'], 1):
+                        st.write(f"{i}. {topic}")
+                
+                # 显示分段总结
+                st.subheader("📑 分段总结")
+                for segment in summary['segments']:
+                    with st.container():
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.write(f"**第{segment['index']}段**")
+                            if segment['start_time']:
+                                st.caption(f"时间: {segment['start_time']}")
+                            st.write(segment['summary'])
+                        with col2:
+                            if segment['keywords']:
+                                st.write("**关键词:**")
+                                keywords_html = ""
+                                for kw in segment['keywords']:
+                                    keywords_html += f'<span style="background-color: #f0f2f6; color: #262730; padding: 2px 8px; margin: 2px; border-radius: 12px; font-size: 12px; display: inline-block;">{kw}</span> '
+                                st.markdown(keywords_html, unsafe_allow_html=True)
+                        st.divider()
+                
+                # 结构化总结的导出选项
+                st.subheader("💾 导出结构化总结")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if st.button("📄 导出为TXT", key="export_structured_txt"):
+                        try:
+                            txt_path = st.session_state.summarizer.export_summary(
+                                summary, "txt", st.session_state.media_title
+                            )
+                            with open(txt_path, 'r', encoding='utf-8') as f:
+                                txt_content = f.read()
+                            st.download_button(
+                                "下载TXT文件",
+                                txt_content,
+                                file_name=os.path.basename(txt_path),
+                                mime="text/plain"
+                            )
+                            st.success("TXT文件已生成")
+                        except Exception as e:
+                            st.error(f"导出TXT失败：{str(e)}")
+                
+                with col2:
+                    if st.button("📝 导出为Markdown", key="export_structured_md"):
+                        try:
+                            md_path = st.session_state.summarizer.export_summary(
+                                summary, "markdown", st.session_state.media_title
+                            )
+                            with open(md_path, 'r', encoding='utf-8') as f:
+                                md_content = f.read()
+                            st.download_button(
+                                "下载Markdown文件",
+                                md_content,
+                                file_name=os.path.basename(md_path),
+                                mime="text/markdown"
+                            )
+                            st.success("Markdown文件已生成")
+                        except Exception as e:
+                            st.error(f"导出Markdown失败：{str(e)}")
+                
+                with col3:
+                    if st.button("📑 导出为PDF", key="export_structured_pdf"):
+                        try:
+                            pdf_path = st.session_state.summarizer.export_summary(
+                                summary, "pdf", st.session_state.media_title
+                            )
+                            with open(pdf_path, 'rb') as f:
+                                pdf_content = f.read()
+                            st.download_button(
+                                "下载PDF文件",
+                                pdf_content,
+                                file_name=os.path.basename(pdf_path),
+                                mime="application/pdf"
+                            )
+                            st.success("PDF文件已生成")
+                        except Exception as e:
+                            st.error(f"导出PDF失败：{str(e)}")
             
-            # 显示总体总结
-            st.subheader("📝 总体总结")
-            st.write(summary['overall_summary'])
+            elif st.session_state.deep_analysis_result:
+                # 显示深度分析结果
+                st.subheader("🧠 深度分析结果")
+                st.write(st.session_state.deep_analysis_result)
+                
+                # 深度分析的导出选项
+                st.subheader("💾 导出深度分析")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # 下载为TXT格式
+                    st.download_button(
+                        "📄 下载深度分析报告 (TXT)",
+                        st.session_state.deep_analysis_result,
+                        file_name=f"{st.session_state.media_title}_深度分析.txt",
+                        mime="text/plain",
+                        key="download_deep_analysis_txt"
+                    )
+                
+                with col2:
+                    # 下载为Markdown格式（适合公众号使用）
+                    st.download_button(
+                        "📝 下载深度分析报告 (Markdown)",
+                        st.session_state.deep_analysis_result,
+                        file_name=f"{st.session_state.media_title}_深度分析.md",
+                        mime="text/markdown",
+                        key="download_deep_analysis_md"
+                    )
+                
+                # 添加清空结果的选项
+                st.divider()
+                if st.button("🗑️ 清空当前结果", key="clear_deep_analysis", help="清空当前显示的深度分析结果"):
+                    st.session_state.deep_analysis_result = None
+                    st.success("已清空深度分析结果")
+                    st.rerun()
             
-            # 显示主题分析
-            if summary['topics']:
-                st.subheader("🏷️ 主要主题")
-                for i, topic in enumerate(summary['topics'], 1):
-                    st.write(f"{i}. {topic}")
-            
-            # 显示分段总结
-            st.subheader("📑 分段总结")
-            for segment in summary['segments']:
-                with st.container():
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.write(f"**第{segment['index']}段**")
-                        if segment['start_time']:
-                            st.caption(f"时间: {segment['start_time']}")
-                        st.write(segment['summary'])
-                    with col2:
-                        if segment['keywords']:
-                            st.write("**关键词:**")
-                            keywords_html = ""
-                            for kw in segment['keywords']:
-                                keywords_html += f'<span style="background-color: #f0f2f6; color: #262730; padding: 2px 8px; margin: 2px; border-radius: 12px; font-size: 12px; display: inline-block;">{kw}</span> '
-                            st.markdown(keywords_html, unsafe_allow_html=True)
-                    st.divider()
-            
-            # 导出选项
-            st.subheader("💾 导出总结")
-            col1, col2, col3 = st.columns(3)
-            
+            # 通用功能：重新选择总结模式
+            st.divider()
+            col1, col2 = st.columns(2)
             with col1:
-                if st.button("📄 导出为TXT"):
-                    try:
-                        txt_path = st.session_state.summarizer.export_summary(
-                            summary, "txt", st.session_state.media_title
-                        )
-                        with open(txt_path, 'r', encoding='utf-8') as f:
-                            txt_content = f.read()
-                        st.download_button(
-                            "下载TXT文件",
-                            txt_content,
-                            file_name=os.path.basename(txt_path),
-                            mime="text/plain"
-                        )
-                        st.success("TXT文件已生成")
-                    except Exception as e:
-                        st.error(f"导出TXT失败：{str(e)}")
+                if st.button("🔄 重新选择总结模式", key="change_summary_mode"):
+                    # 清空所有结果，让用户重新选择
+                    st.session_state.summary_data = None
+                    st.session_state.deep_analysis_result = None
+                    st.session_state.summarize_completed = False
+                    st.success("已重置，请重新选择总结模式")
+                    st.rerun()
             
             with col2:
-                if st.button("📝 导出为Markdown"):
-                    try:
-                        md_path = st.session_state.summarizer.export_summary(
-                            summary, "markdown", st.session_state.media_title
-                        )
-                        with open(md_path, 'r', encoding='utf-8') as f:
-                            md_content = f.read()
-                        st.download_button(
-                            "下载Markdown文件",
-                            md_content,
-                            file_name=os.path.basename(md_path),
-                            mime="text/markdown"
-                        )
-                        st.success("Markdown文件已生成")
-                    except Exception as e:
-                        st.error(f"导出Markdown失败：{str(e)}")
-            
-            with col3:
-                if st.button("📑 导出为PDF"):
-                    try:
-                        pdf_path = st.session_state.summarizer.export_summary(
-                            summary, "pdf", st.session_state.media_title
-                        )
-                        with open(pdf_path, 'rb') as f:
-                            pdf_content = f.read()
-                        st.download_button(
-                            "下载PDF文件",
-                            pdf_content,
-                            file_name=os.path.basename(pdf_path),
-                            mime="application/pdf"
-                        )
-                        st.success("PDF文件已生成")
-                    except Exception as e:
-                        st.error(f"导出PDF失败：{str(e)}")
-    
-    # 显示深度分析结果
-    if st.session_state.deep_analysis_result:
-        analysis_expander = st.expander("🧠 深度分析结果", expanded=True)
-        with analysis_expander:
-            st.write(st.session_state.deep_analysis_result)
-            
-            # 导出深度分析结果
-            st.download_button(
-                "📥 下载深度分析报告",
-                st.session_state.deep_analysis_result,
-                file_name=f"{st.session_state.media_title}_深度分析.txt",
-                mime="text/plain"
-            )
-    
-    download_expander = st.expander("第四步：下载转录文件", expanded=False)
+                if st.button("📊 切换到另一种总结模式", key="switch_summary_mode"):
+                    # 切换到另一种模式（但保留当前结果）
+                    current_mode = st.session_state.summary_mode
+                    new_mode = "deep_analysis" if current_mode == "structured" else "structured"
+                    st.session_state.summary_mode = new_mode
+                    
+                    mode_names = {
+                        "structured": "结构化总结",
+                        "deep_analysis": "深度分析"
+                    }
+                    st.info(f"已切换到 {mode_names[new_mode]} 模式，您可以对同一份内容进行不同类型的分析")
+                    st.rerun()
+
+    # 第四步：下载转录文件功能
+    download_expander = st.expander("第四步：下载原始转录文件", expanded=False)
     with download_expander:
         st.success("✅ 转录已完成，可以下载原始转录文件")
         
@@ -765,7 +865,7 @@ ai_models:
                     data=st.session_state.transcript,
                     file_name=os.path.basename(st.session_state.txt_path),
                     mime="text/plain",
-                    key="download_txt"
+                    key="download_original_txt"
                 )
             else:
                 st.warning("TXT 文件不可用")
@@ -783,7 +883,7 @@ ai_models:
                         data=pdf_data,
                         file_name=os.path.basename(st.session_state.pdf_path),
                         mime="application/pdf",
-                        key="download_pdf"
+                        key="download_original_pdf"
                     )
                 except Exception as e:
                     st.error(f"读取PDF文件失败: {e}")
@@ -793,6 +893,7 @@ ai_models:
                 st.warning("PDF 文件不可用")
         
         # 添加重新转录选项
+        st.divider()
         if st.button("🔄 重新转录", key="retranscribe"):
             st.session_state.transcribe_completed = False
             st.session_state.transcript = None
@@ -802,6 +903,7 @@ ai_models:
             st.session_state.summarize_completed = False
             st.session_state.summary_data = None
             st.session_state.deep_analysis_result = None
+            st.success("已重置转录状态，可以重新开始转录")
             st.rerun()
 
 # 转录结果显示

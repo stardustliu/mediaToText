@@ -577,27 +577,126 @@ class PodcastSummarizer:
             return []
     
     def deep_analysis(self, text: str, model_key: str) -> str:
-        """基于prompt.txt进行深度分析"""
-        if not self.config['advanced_features']['deep_analysis']['enabled']:
-            raise Exception("深度分析功能未启用")
+        """基于prompt.txt进行深度分析，支持分块处理"""
+        # 首先检查prompt.txt文件是否存在（优先级最高）
+        prompt_file = "prompt.txt"  # 默认路径
         
-        prompt_file = self.config['advanced_features']['deep_analysis']['prompt_file_path']
+        # 如果配置文件存在且有自定义路径，则使用配置的路径
+        if (self.config and 
+            'advanced_features' in self.config and 
+            'deep_analysis' in self.config['advanced_features'] and 
+            'prompt_file_path' in self.config['advanced_features']['deep_analysis']):
+            prompt_file = self.config['advanced_features']['deep_analysis']['prompt_file_path']
+        
+        # 检查prompt文件是否存在
+        if not os.path.exists(prompt_file):
+            raise Exception(f"深度分析模板文件不存在：{prompt_file}")
+        
+        # 检查配置文件中的启用设置（如果存在配置）
+        if (self.config and 
+            'advanced_features' in self.config and 
+            'deep_analysis' in self.config['advanced_features'] and 
+            'enabled' in self.config['advanced_features']['deep_analysis'] and 
+            not self.config['advanced_features']['deep_analysis']['enabled']):
+            raise Exception("深度分析功能在配置文件中被禁用，如需使用请在config.yaml中设置 advanced_features.deep_analysis.enabled: true")
         
         try:
             with open(prompt_file, 'r', encoding='utf-8') as f:
                 custom_prompt = f.read()
-        except FileNotFoundError:
-            raise Exception(f"Prompt文件 {prompt_file} 不存在")
+        except Exception as e:
+            raise Exception(f"读取深度分析模板文件失败：{str(e)}")
+        
+        if not custom_prompt.strip():
+            raise Exception("深度分析模板文件内容为空")
         
         model_config = self.config['ai_models'][model_key]
-        client = AIModelClient(model_config)
+        client = AIModelClient(model_config, self.retry_config)
         
-        messages = [{
-            "role": "user",
-            "content": f"请根据以下指导原则对播客内容进行深度分析：\n\n【分析指导】\n{custom_prompt}\n\n【播客内容】\n{text}"
-        }]
+        # 检查是否启用分块处理
+        enable_chunking = (self.config and 
+                          'advanced_features' in self.config and 
+                          'deep_analysis' in self.config['advanced_features'] and 
+                          self.config['advanced_features']['deep_analysis'].get('enable_chunking', False))
         
-        return client.call_api(messages, "你是一个专业的内容分析专家，请严格按照给定的指导原则进行分析。")
+        chunk_size = (self.config and 
+                     'advanced_features' in self.config and 
+                     'deep_analysis' in self.config['advanced_features'] and 
+                     self.config['advanced_features']['deep_analysis'].get('chunk_size', 3000))
+        
+        # 如果文本较长且启用分块处理
+        if enable_chunking and len(text) > chunk_size:
+            st.info(f"💡 文本较长（{len(text)}字符），将采用分块处理以提高成功率...")
+            
+            # 将文本分块
+            chunks = []
+            words = text.split()
+            current_chunk = []
+            current_length = 0
+            
+            for word in words:
+                word_length = len(word)
+                if current_length + word_length > chunk_size and current_chunk:
+                    chunks.append(' '.join(current_chunk))
+                    current_chunk = [word]
+                    current_length = word_length
+                else:
+                    current_chunk.append(word)
+                    current_length += word_length
+            
+            if current_chunk:
+                chunks.append(' '.join(current_chunk))
+            
+            st.info(f"📊 文本已分为 {len(chunks)} 块进行处理")
+            
+            # 处理每个块
+            chunk_results = []
+            for i, chunk in enumerate(chunks):
+                try:
+                    st.info(f"🔄 正在处理第 {i+1}/{len(chunks)} 块...")
+                    
+                    messages = [{
+                        "role": "user",
+                        "content": f"请对以下播客内容片段进行分析，这是第{i+1}部分，共{len(chunks)}部分：\n\n【分析指导】\n{custom_prompt}\n\n【播客内容片段】\n{chunk}"
+                    }]
+                    
+                    chunk_result = client.call_api(messages, f"你是一个专业的内容分析专家。这是多段内容中的第{i+1}段，请按照指导原则进行分析。")
+                    chunk_results.append(f"## 第{i+1}部分分析\n\n{chunk_result}")
+                    
+                except Exception as e:
+                    st.warning(f"⚠️ 第 {i+1} 块处理失败：{str(e)}")
+                    chunk_results.append(f"## 第{i+1}部分分析\n\n[处理失败: {str(e)}]")
+            
+            # 合并结果
+            if chunk_results:
+                final_result = "\n\n".join(chunk_results)
+                
+                # 如果所有块都处理成功，尝试生成整体总结
+                if len([r for r in chunk_results if "[处理失败" not in r]) == len(chunks):
+                    try:
+                        st.info("🔄 正在生成整体总结...")
+                        summary_messages = [{
+                            "role": "user",
+                            "content": f"请基于以下各部分的分析，生成一篇完整统一的深度分析文章：\n\n{final_result}"
+                        }]
+                        
+                        overall_summary = client.call_api(summary_messages, "你是一个专业的内容整合专家，请将分段分析整合为一篇连贯的完整文章。")
+                        return overall_summary
+                        
+                    except Exception as e:
+                        st.warning(f"⚠️ 整体总结生成失败，返回分块结果：{str(e)}")
+                        return final_result
+                else:
+                    return final_result
+            else:
+                raise Exception("所有分块处理都失败了")
+        else:
+            # 正常处理（不分块）
+            messages = [{
+                "role": "user",
+                "content": f"请根据以下指导原则对播客内容进行深度分析：\n\n【分析指导】\n{custom_prompt}\n\n【播客内容】\n{text}"
+            }]
+            
+            return client.call_api(messages, "你是一个专业的内容分析专家，请严格按照给定的指导原则进行分析。")
     
     def export_summary(self, summary_data: Dict, format_type: str, filename: str) -> str:
         """导出总结到不同格式"""
